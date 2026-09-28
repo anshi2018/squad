@@ -14,7 +14,7 @@
       "source": "workflows/package/squad.md",
       "destination": ".github/workflows/squad.md",
       "lock": ".github/workflows/squad.lock.yml",
-      "source_sha256": "70eb04edba8c0ca129f910f1d7c11d9378c7832e737a8922d5fa928278a670e6"
+      "source_sha256": "667ba94927debf9c6c28e734889af71429511810043596b016a372b0049dd33c"
     },
     {
       "name": "squad-implement-worker",
@@ -56,7 +56,14 @@
       "source": "workflows/package/squad-bootstrap.md",
       "destination": ".github/workflows/squad-bootstrap.md",
       "lock": ".github/workflows/squad-bootstrap.lock.yml",
-      "source_sha256": "f17065511fdc32fb57c2bb41758afd922dfeddbbc6168339d6800498f2470209"
+      "source_sha256": "d1634388b975c26bc0c203590fac4287e9b44e84f1c850c7450211ec5ea2070b"
+    },
+    {
+      "name": "squad-command-router",
+      "source": "workflows/package/squad-command-router.md",
+      "destination": ".github/workflows/squad-command-router.md",
+      "lock": ".github/workflows/squad-command-router.lock.yml",
+      "source_sha256": "cbce466a6cfe64c194b17672ea3363fe7c22cb6b4258c195cc93a2d294d0bf88"
     }
   ],
   "shared_runtime": [
@@ -66,7 +73,15 @@
       "package_destination": ".github/workflows/shared/squad-install-verifier.mjs",
       "destination": ".github/workflows/shared/squad-install-verifier.mjs",
       "ownership": "manifest",
-      "sha256": "0da2b31a80b47e428cb215a00d4655b54b7b66e4a6a2522f0f4da8f119d0346e"
+      "sha256": "d8dc721b3515a179172da24b63af6ca1397ee4282c6f904223b523599b7a85bd"
+    },
+    {
+      "path": "shared/squad-command-contract.mjs",
+      "source": "workflows/shared/squad-command-contract.mjs",
+      "package_destination": ".github/workflows/shared/squad-command-contract.mjs",
+      "destination": ".github/workflows/shared/squad-command-contract.mjs",
+      "ownership": "manifest",
+      "sha256": "56c489a98a50024ac89a00e0d9a5e394d3ecfe5de5855a1baba5877ff29351c3"
     },
     {
       "path": "shared/squad-cast-validator.mjs",
@@ -186,7 +201,7 @@
       "name": "gh-aw-enlistment",
       "source": "workflows/skills/gh-aw-enlistment/SKILL.md",
       "destination": ".github/skills/gh-aw-enlistment/SKILL.md",
-      "sha256": "1e5ff6bf5150df742157dca38e8af35a34c42522976d0a68e1885a0e8b51ae9c"
+      "sha256": "565f0d134812103170ed8bd2aa381aba50001372405593e05b7ae4ce1522c3d4"
     }
   ],
   "bootstrap": {

@@ -19,7 +19,6 @@ import { POSIX_SHELL, NO_POSIX_SHELL_MESSAGE, requirePosixShell } from './posix-
 import {
   extractRunBlocks,
   scanRunBlocks,
-  extractBodyHandlingShell,
   scanShellLines,
   formatViolations,
   type ContractToken,
@@ -341,7 +340,7 @@ describe('gh-aw: safe-output configuration', () => {
 
   it('each safe-output has a max value that is a positive integer ≤ 1000', () => {
     for (const [name, config] of Object.entries(safeOutputs)) {
-      if (name === 'data' || name === 'messages' || name === 'jobs' || name === 'allowed-domains') continue;
+      if (name === 'data' || name === 'messages' || name === 'jobs' || name === 'steps' || name === 'allowed-domains') continue;
       expect(config.max, `${name} should have a max field`).toBeDefined();
       const max = config.max as number;
       expect(max, `${name}.max should be > 0`).toBeGreaterThan(0);
@@ -645,6 +644,7 @@ describe('gh-aw: shared component imports', () => {
 
   it('declares the plaintext Cast validator resource and canonical built-in charter resources, not imported skills', () => {
     const runtimeResources = [
+      'shared/squad-command-contract.mjs',
       'shared/squad-cast-validator.mjs',
       'shared/squad-bootstrap-validator.mjs',
       'shared/squad-improvement-gate.mjs',
@@ -736,6 +736,7 @@ describe('gh-aw: clean install runtime resource closure', () => {
     'shared/implementation-provenance-v1.schema.json',
     'shared/squad-bootstrap-validator.mjs',
     'shared/squad-cast-validator.mjs',
+    'shared/squad-command-contract.mjs',
     'shared/squad-implementation-provenance.mjs',
     'shared/squad-improvement-gate.mjs',
     'shared/squad-install-verifier.mjs',
@@ -1524,14 +1525,9 @@ describe('gh-aw: inline skill extraction', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Test: gh-aw compilation retains durable state, Auto-Cast contracts, AND the
-// shell input security contract over compiled output (#1834).
+// Test: gh-aw compilation retains durable state, Auto-Cast contracts, command
+// rejection, AND the shell input security contract over compiled output.
 // ---------------------------------------------------------------------------
-//
-// workflows/squad.md §"Shell input security contract [MANDATORY]" declares that
-// attacker-controlled GitHub event text may reach the shell only through named
-// env: vars read via quoted expansion, and names four greppable anti-patterns.
-// That contract was declared but unenforced. This suite is the gate.
 //
 // The gate FAILS CLOSED. It used to gate on `it.skipIf(!ghAwAvailable)`, which is
 // the exact "silently skipped while the suite reports green" defect this file's
@@ -1788,18 +1784,18 @@ describe('gh-aw: compiled workflow shell input security contract', () => {
     expect(agentExecutionIndex).toBeGreaterThan(materializeIndex);
   }, 20000);
 
-  it('keeps the v0.87.10 completion hook neutral when a custom safe job fails', () => {
+  it('keeps custom safe-output failure visible in the terminal workflow state', () => {
     const compiled = lockText();
-    const completionStep = compiled.match(
-      /      - name: Update reaction comment with completion status\n[\s\S]*?(?=\n  detection:)/,
-    )?.[0] ?? '';
-    expect(completionStep).toContain('GH_AW_AGENT_CONCLUSION: ${{ needs.agent.result }}');
-    expect(completionStep).toContain('GH_AW_SAFE_OUTPUTS_RESULT: ${{ needs.safe_outputs.result }}');
-    expect(completionStep).not.toContain('needs.cast_failure.result');
-    expect(completionStep).toContain(
+    const conclusionNeeds = compiled.match(
+      /^  conclusion:\n    needs:\n([\s\S]*?)(?=    if:)/m,
+    )?.[1] ?? '';
+    expect(conclusionNeeds).toContain('- safe_outputs');
+    expect(compiled).toContain(
+      "needs.safe_outputs.result == 'success'",
+    );
+    expect(compiled).toContain(
       'This completion message does not indicate Cast success. For Cast, only a linked Cast pull request indicates success.',
     );
-    expect(completionStep).not.toMatch(/runSuccess[^\\n]*completed successfully/i);
   }, 20000);
 
   it('preserves the standalone release selection in the compiled install step (#1884)', () => {
@@ -1840,8 +1836,7 @@ describe('gh-aw: compiled workflow shell input security contract', () => {
     const violations = scanRunBlocks(blocks, '.github/workflows/squad.lock.yml');
     expect(
       violations,
-      `Compiled run: blocks violate the shell input security contract ` +
-        `(workflows/squad.md §"Shell input security contract [MANDATORY]"). Actions ` +
+      `Compiled run: blocks violate the shell input security contract. Actions ` +
         `expands \${{ … }} before the shell starts, so event text in a run: block is ` +
         `unsafe even inside quotes. Each entry names the anti-pattern token, file, and ` +
         `line:\n${formatViolations(violations)}\n\n` +
@@ -1852,31 +1847,26 @@ describe('gh-aw: compiled workflow shell input security contract', () => {
     ).toEqual([]);
   }, 20000);
 
-  it('routes the /squad parser body only through contract-safe shell', () => {
-    // The printf/eval/awk hops live in the parser one-liners of workflows/squad.md,
-    // which gh-aw pulls in verbatim at runtime via {{#runtime-import … squad.md}} —
-    // never inlined into the lock. This is the only surface on which those hops can
-    // be observed, so it is scanned directly (see gh-aw-shell-contract.ts header).
-    const source = readText(SQUAD_WORKFLOW);
-    const shell = extractBodyHandlingShell(source);
-
-    expect(
-      shell.length,
-      'No body-handling shell found in workflows/squad.md. The /squad parser reads ' +
-        'SQUAD_TRIGGER_BODY through fenced bash; zero matches means the extractor lost ' +
-        'the parser code and the printf/eval/awk hops are unmeasured (#1834).'
-    ).toBeGreaterThan(0);
-
-    const violations = scanShellLines(shell, 'workflows/squad.md');
-    expect(
-      violations,
-      `The /squad parser passes attacker body text into a forbidden shell construct ` +
-        `(workflows/squad.md §"Shell input security contract [MANDATORY]"). Each entry ` +
-        `names the anti-pattern token, file, and line:\n${formatViolations(violations)}\n\n` +
-        `Reproduce: inspect the parser one-liners that read the body variable:\n` +
-        `  grep -nE 'printf +"?\\$|awk +-v|eval|bash +-c' workflows/squad.md`
-    ).toEqual([]);
-  });
+  it('compiles one shared command contract into pre-agent context and safe-output failure', () => {
+    const compiled = lockText().replace(/\\"/g, '"');
+    expect(compiled).toContain('name: Materialize deterministic Squad command context');
+    expect(compiled).toContain('squad-command-contract.mjs"');
+    expect(compiled).toContain('--materialize "$SQUAD_COMMAND_CONTEXT"');
+    expect(compiled).toContain('name: Reject unknown or malformed Squad commands');
+    expect(compiled).toContain('enforceSquadCommandContract');
+    expect(compiled).toContain('github.rest.issues.createComment');
+    expect(compiled).toContain('core.setFailed');
+    expect(compiled.indexOf('name: Materialize deterministic Squad command context')).toBeLessThan(
+      compiled.indexOf('name: Execute GitHub Copilot CLI'),
+    );
+    const commandGuard = compiled.match(
+      /      - name: Reject unknown or malformed Squad commands\n[\s\S]*?(?=\n      - (?:name:|uses:)|\n  [a-z_]+:)/,
+    )?.[0] ?? '';
+    expect(commandGuard).toContain('.squad-command-trusted-base');
+    expect(compiled).toMatch(
+      /name: Checkout executing workflow commit for command enforcement[\s\S]*?ref: \$\{\{ github\.workflow_sha \}\}/,
+    );
+  }, 20000);
 
   it('positive control: turns red on a known-violating compiled fixture, naming token, file, and line', () => {
     // RETRO's acceptance bar (#1834): "A gate that cannot turn red on a fixture

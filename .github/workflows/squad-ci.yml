@@ -712,9 +712,9 @@ jobs:
           fi
 
   # ── gh-aw strict compile gate ────────────────────────────────────────────
-  # Compiles all seven Squad-authored workflow sources with --strict against a
+  # Compiles all eight Squad-authored workflow sources with --strict against a
   # pinned compiler so the delivered stack is always proven compilable. All
-  # seven workflows, including squad-improvement-worker and squad-bootstrap, are distributed by the
+  # eight workflows, including squad-improvement-worker, squad-bootstrap, and squad-command-router, are distributed by the
   # gh-aw-enlistment bootstrap skill/docs as part of the standard install --
   # squad-improvement-worker stays dormant (approval-gated) until a maintainer
   # authorizes a governance-scoped retrospective proposal, but it is not a
@@ -783,11 +783,11 @@ jobs:
               --write-local-test-ownership \
               --source-revision "$SQUAD_SOURCE_REVISION"
             node .github/workflows/shared/squad-install-verifier.mjs --materialize-runtime
-            test "$(find .github/workflows -maxdepth 1 -name 'squad*.md' | wc -l | tr -d ' ')" = 7
-            test "$(find .github/workflows/shared -type f ! -name 'squad-bootstrap-trigger-probe.json' | wc -l | tr -d ' ')" = 15
+            test "$(find .github/workflows -maxdepth 1 -name 'squad*.md' | wc -l | tr -d ' ')" = 8
+            test "$(find .github/workflows/shared -type f ! -name 'squad-bootstrap-trigger-probe.json' | wc -l | tr -d ' ')" = 16
             test "$(find .github/skills/gh-aw-enlistment -type f | wc -l | tr -d ' ')" = 1
             gh aw compile --strict --approve --no-check-update
-            for workflow in squad squad-implement-worker squad-review squad-deps-worker squad-retro squad-improvement-worker squad-bootstrap; do
+            for workflow in squad squad-implement-worker squad-review squad-deps-worker squad-retro squad-improvement-worker squad-bootstrap squad-command-router; do
               gh aw compile "$workflow" --strict --no-check-update
               test -f ".github/workflows/${workflow}.lock.yml"
             done
