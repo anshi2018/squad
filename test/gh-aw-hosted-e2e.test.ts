@@ -161,7 +161,7 @@ describe('Squad gh-aw hosted E2E controller', () => {
     const contract = loadBundleContract(ROOT);
     expect(contract.package).toBe('bradygaster/squad/workflows');
     expect(contract.workflows).toHaveLength(8);
-    expect(contract.runtime).toHaveLength(16);
+    expect(contract.runtime).toHaveLength(17);
     expect(contract.skills).toHaveLength(1);
     expect(contract.triggerProbe).toBe('shared/squad-bootstrap-trigger-probe.json');
     expect(() => loadInstalledBundleContract(resolve(ROOT, 'does-not-exist'))).toThrow(/missing or invalid/);

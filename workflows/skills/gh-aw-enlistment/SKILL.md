@@ -146,7 +146,7 @@ gh aw add "bradygaster/squad/workflows@${SQUAD_SHA}"
 
 The nested `workflows/aw.yml` is the only supported distribution registration.
 It isolates package auto-discovery from unrelated repository skills and agents,
-and installs exactly eight workflows, sixteen runtime resources, and one
+and installs exactly eight workflows, seventeen runtime resources, and one
 `gh-aw-enlistment` skill at the same resolved revision:
 
 - `squad.md` + `squad.lock.yml`
@@ -230,7 +230,7 @@ criteria:
 ### 6. Require the verifier to prove the complete consumer contract
 
 - **STOP** if the verifier reports a missing source/lock pair, missing package
-  ownership record, stale source/resource digest, incomplete seven-workflow
+  ownership record, stale source/resource digest, incomplete eight-workflow
   registration, or mixed revision.
 - Use only the recovery commands printed by the verifier. They reinstall the
   complete package at one immutable revision; never repair one workflow or

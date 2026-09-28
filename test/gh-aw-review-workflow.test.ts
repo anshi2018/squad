@@ -4,6 +4,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { extractSafeOutputsConfigJson } from './helpers/gh-aw-lock.js';
+import { parse } from 'yaml';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const REVIEWER = read('workflows/squad-review.md');
@@ -99,7 +100,10 @@ function assertReviewerContract(workflow: string): void {
     '4:None of the above:Unattributed',
   ]);
   expect(workflow).toMatch(/invalid provenance\. Fail closed with\s+`noop`; do not fall back/);
-  expect(workflow).toMatch(/`Unattributed` is an automatic-review\s+refusal/);
+  expect(workflow).toContain('Every same-repository PR (including');
+  expect(workflow).toContain('inlined-imports: true');
+  expect(workflow).toContain('await guard.enforceReviewOutputs');
+  expect(workflow).toContain('await guard.assertClearingReview');
   expect(workflow).toContain('Human approval remains mandatory.');
 }
 
@@ -108,12 +112,13 @@ interface CompiledContract {
   safeOutputs: Record<string, Record<string, unknown>>;
 }
 
-function compileReviewer(): CompiledContract {
+function compileReviewer(workflow = REVIEWER): CompiledContract {
   const workspace = mkdtempSync(resolve(ROOT, '.squad-review-contract-'));
   compileWorkspaces.push(workspace);
   const workflowDir = resolve(workspace, '.github', 'workflows');
   mkdirSync(workflowDir, { recursive: true });
   cpSync(resolve(ROOT, 'workflows'), workflowDir, { recursive: true });
+  writeFileSync(resolve(workflowDir, 'squad-review.md'), workflow);
   execFileSync('git', ['init', '--quiet'], { cwd: workspace });
   execFileSync(
     'gh',
@@ -137,7 +142,33 @@ afterAll(() => {
   }
 });
 
-describe('gh-aw advisory Squad reviewer', () => {
+function assertCompiledGate(lock: string): void {
+  const workflow = parse(lock);
+  const { jobs } = workflow;
+  expect(workflow['run-name']).toBe('Squad review — PR #${{ github.event.inputs.issue_number || github.event.pull_request.number }}');
+  const review = jobs.review;
+  expect(review.name).toBe("${{ github.event_name == 'pull_request' && 'Squad Review / review' || 'Squad Review / manual' }}");
+  expect(review.if).toBe('always()');
+  expect(review.needs).toEqual(expect.arrayContaining(['agent', 'safe_outputs']));
+  const execution = review.steps.find((step: { name: string }) => step.name === 'Require successful PR review execution');
+  expect(execution.run).toContain('test "$AGENT_RESULT" = success');
+  expect(execution.run).toContain('test "$OUTPUT_RESULT" = success');
+  expect(review.steps.at(-1).with.script).toContain('await guard.assertClearingReview');
+  expect(review.steps.at(-1).env.SQUAD_REVIEW_HEAD).toBe('${{ github.event.pull_request.head.sha }}');
+  const steps = jobs.safe_outputs.steps;
+  const guard = steps.findIndex((step: { name: string }) => step.name === 'Bind review output to committed agent identities and current head');
+  const process = steps.findIndex((step: { name: string }) => step.name === 'Process Safe Outputs');
+  expect(guard).toBeGreaterThan(-1);
+  expect(process).toBeGreaterThan(guard);
+  expect(steps[guard].with.script).toContain('await guard.enforceReviewOutputs');
+  expect(steps[guard].if).toBeUndefined();
+  expect(steps[guard]['continue-on-error']).toBeUndefined();
+  expect(steps[guard - 1].with.ref).toBe('${{ github.event.pull_request.base.sha || github.workflow_sha }}');
+  for (const step of review.steps) expect(step['continue-on-error']).toBeUndefined();
+  expect(review['continue-on-error']).toBeUndefined();
+}
+
+describe('gh-aw enforcing Squad reviewer', () => {
   it('routes /squad review to the isolated workflow and supports automatic PR events', () => {
     const routerDispatch = yamlBlock(ROUTER_FRONTMATTER, 'dispatch-workflow');
     const reviewTrigger = yamlBlock(REVIEWER_FRONTMATTER, 'on');
@@ -152,7 +183,7 @@ describe('gh-aw advisory Squad reviewer', () => {
     expect(ROUTER).toContain('| `/squad review` | Review Relay |');
     expect(REVIEWER).not.toContain('slash_command:');
     expect(reviewTrigger).toMatch(/workflow_dispatch:\n\s+inputs:/);
-    expect(reviewTrigger).toMatch(/pull_request:\n\s+types: \[ready_for_review, synchronize\]/);
+    expect(reviewTrigger).toMatch(/pull_request:\n\s+types: \[opened, reopened, ready_for_review, synchronize\]/);
     expect(relayPayload).toEqual({
       workflow_name: 'squad-review',
       inputs: {
@@ -229,7 +260,7 @@ describe('gh-aw advisory Squad reviewer', () => {
     expect(DEMO).not.toContain('gh aw add bradygaster/squad/workflows/squad.md@latest');
   });
 
-  it('documents advisory review without claiming enforcement or remediation', () => {
+  it('documents enforcement, explicit override, and the independent human approval requirement', () => {
     expect(GUIDE).toContain('| Review | `/squad review` |');
     expect(GUIDE).not.toContain('/squad review fix');
     expect(GUIDE).not.toContain('Review lifecycle and current gaps');
@@ -240,7 +271,9 @@ describe('gh-aw advisory Squad reviewer', () => {
     expect(GUIDE).toContain('`REQUEST_CHANGES`');
     expect(GUIDE).toContain('no file-editing, issue-creation,');
     expect(GUIDE).toContain('Human approval remains mandatory.');
-    expect(GUIDE).toContain('Because review is advisory, it is possible to merge without waiting');
+    expect(GUIDE).toContain('Squad Review / review');
+    expect(GUIDE).toContain('Squad-Review-Override:');
+    expect(GUIDE.replace(/\s+/g, ' ')).toContain('only after advisory soak');
     expect(GUIDE).toContain('This follow-up is only needed when the safe-update warning appears.');
     expect(README).toContain('`gh aw add` compiles the workflows automatically.');
     expect(README).toContain('run `gh aw compile --approve`');
@@ -255,11 +288,12 @@ describe('gh-aw advisory Squad reviewer', () => {
     assertReviewerContract(REVIEWER);
   });
 
-  it('keeps reviewer authority advisory-only with bounded verdicts', () => {
+  it('keeps reviewer authority read-only with bounded non-approval verdicts', () => {
     const safeOutputs = yamlBlock(REVIEWER_FRONTMATTER, 'safe-outputs');
     const outputNames = [...safeOutputs.matchAll(/^  ([\w-]+):\s*$/gm)].map(match => match[1]);
 
     expect(outputNames).toEqual([
+      'steps',
       'add-comment',
       'create-pull-request-review-comment',
       'submit-pull-request-review',
@@ -276,7 +310,7 @@ describe('gh-aw advisory Squad reviewer', () => {
     );
     expect(concurrency).toContain('cancel-in-progress: true');
     expect(REVIEWER_FRONTMATTER).not.toMatch(/^\s+forks:/m);
-    expect(REVIEWER).toContain('If an existing review body contains the exact marker');
+    expect(REVIEWER).toContain('If an existing bot review contains a `Squad-Review-Verdict:` record');
     expect(REVIEWER).toContain('Never re-review an unchanged head');
     expect(REVIEWER).toContain('Re-fetch the pull request immediately before emitting');
   });
@@ -295,8 +329,9 @@ describe('gh-aw advisory Squad reviewer', () => {
     }
   });
 
-  it('strict-compiles to read-only agent permissions and only advisory write handlers', () => {
+  it('strict-compiles to read-only agent permissions and an always-running final gate', () => {
     const { lock, safeOutputs } = compileReviewer();
+    assertCompiledGate(lock);
     const agentJob = lock.match(/^  agent:\n([\s\S]*?)(?=^  [\w-]+:\n)/m)?.[1] ?? '';
     const permissionBlock = yamlBlock(agentJob, 'permissions');
 
@@ -310,6 +345,7 @@ describe('gh-aw advisory Squad reviewer', () => {
     expect(safeOutputs.submit_pull_request_review).toMatchObject({
       max: 1,
       allowed_events: ['COMMENT', 'REQUEST_CHANGES'],
+      commit_id: '${{ github.event.pull_request.head.sha || github.event.inputs.expected_head_sha }}',
     });
     expect(safeOutputs).not.toHaveProperty('dispatch_workflow');
     expect(safeOutputs).not.toHaveProperty('create_issue');
@@ -335,7 +371,8 @@ describe('gh-aw advisory Squad reviewer', () => {
         '| 1 | `squad/implement-*` head branch with no marker-like text | Squad-authored fallback |',
       ),
       REVIEWER.replace('invalid provenance. Fail closed with', 'invalid provenance. Continue with'),
-      REVIEWER.replace('`Unattributed` is an automatic-review', '`Unattributed` is an automatic'),
+      REVIEWER.replace('Every same-repository PR (including', 'Some PRs (including'),
+      REVIEWER.replace('inlined-imports: true', 'inlined-imports: false'),
       REVIEWER.replaceAll('Squad-Review-Head: {40-character lowercase head SHA}', 'Reviewed head SHA'),
     ];
 
@@ -343,4 +380,20 @@ describe('gh-aw advisory Squad reviewer', () => {
       expect(() => assertReviewerContract(mutation)).toThrow();
     }
   });
+
+  it('kills real source mutations after compilation, not just prompt-text mutations', () => {
+    assertCompiledGate(compileReviewer().lock);
+    const mutations = [
+      REVIEWER.replace('await guard.enforceReviewOutputs', 'void guard.enforceReviewOutputs'),
+      REVIEWER.replace('await guard.assertClearingReview', 'void guard.assertClearingReview'),
+      REVIEWER.replace("&& 'Squad Review / review'", "&& 'Other check'"),
+      REVIEWER.replace('    if: always()\n', '    if: success()\n'),
+      REVIEWER.replace('    needs: [agent, safe_outputs]', '    needs: [agent]'),
+    ];
+    for (const mutation of mutations) {
+      expect(mutation).not.toBe(REVIEWER);
+      const { lock } = compileReviewer(mutation);
+      expect(() => assertCompiledGate(lock)).toThrow();
+    }
+  }, 60000);
 });
