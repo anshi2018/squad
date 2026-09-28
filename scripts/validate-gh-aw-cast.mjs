@@ -475,14 +475,47 @@ function parseCastingPair(registryRaw, historyRaw, source, errors, options = {})
 
 function committedRegistry(root, errors) {
   try {
+    execFileSync(
+      'git',
+      ['rev-parse', '--verify', 'HEAD'],
+      { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
+    );
+  } catch (error) {
+    errors.push(`registry base: committed HEAD is unavailable (${error.message})`);
+    return null;
+  }
+
+  const registryPath = '.squad/casting/registry.json';
+  const historyPath = '.squad/casting/history.json';
+  let committedPaths;
+  try {
+    committedPaths = new Set(execFileSync(
+      'git',
+      ['ls-tree', '-r', '--name-only', 'HEAD', '--', registryPath, historyPath],
+      { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
+    ).trim().split('\n').filter(Boolean));
+  } catch (error) {
+    errors.push(`registry base: committed registry/history pair is unavailable (${error.message})`);
+    return null;
+  }
+  const hasRegistry = committedPaths.has(registryPath);
+  const hasHistory = committedPaths.has(historyPath);
+
+  if (!hasRegistry && !hasHistory) return null;
+  if (hasRegistry !== hasHistory) {
+    errors.push('registry base: complete committed registry/history pair is required');
+    return null;
+  }
+
+  try {
     const registryRaw = execFileSync(
       'git',
-      ['show', 'HEAD:.squad/casting/registry.json'],
+      ['show', `HEAD:${registryPath}`],
       { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
     );
     const historyRaw = execFileSync(
       'git',
-      ['show', 'HEAD:.squad/casting/history.json'],
+      ['show', `HEAD:${historyPath}`],
       { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
     );
     return parseCastingPair(
