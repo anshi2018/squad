@@ -798,7 +798,7 @@ pre-agent-steps:
       validator_script="$(cd "$(dirname "$validator_script")" && pwd -P)/$(basename "$validator_script")"
 
       # BEGIN GENERATED RESOURCE DIGEST
-      validator_expected_sha256="62fbf47b51639fd1878c143e5176ee3099e390065997411511e9d483d467bbce"
+      validator_expected_sha256="0988e04aeef316f4d7a0107c902bbbcf6538b8899b9fffba5f62150717967685"
       # END GENERATED RESOURCE DIGEST
       : > "$stderr_file"
       validator_actual_sha256="$(
