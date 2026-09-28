@@ -21,8 +21,9 @@ check on the implementation PR green.
 ## Authoritative post-merge canary
 
 Run this only after the workflow/helper change is on `dev`. It creates a disposable branch and PR
-whose filename contains paired backticks, a bare `${`, an apostrophe, a double quote, and a
-newline. The filename is data; do not execute it.
+whose filename contains paired backticks, a bare `${`, an apostrophe, and a double quote. The
+filename is data; do not execute it. Multiline transport coverage belongs in scanner diagnostic
+messages, because the leakage scanner consumes Git's line-delimited `--name-only` output.
 
 ```bash
 git fetch origin dev
@@ -30,13 +31,13 @@ git switch --create canary/repo-health-$(date +%s) origin/dev
 
 node --input-type=module <<'NODE'
 import { mkdirSync, writeFileSync } from 'node:fs';
-const path = '.squad/canary-`paired`-${-apostrophe-\'-"double quote"\nsecond-line.md';
+const path = '.squad/canary-`paired`-${-apostrophe-\'-"double quote".md';
 mkdirSync('.squad', { recursive: true });
 writeFileSync(path, 'repo-health post-merge canary\n');
 NODE
 
 CANARY_PATH=$(node --input-type=module -e \
-  'process.stdout.write(".squad/canary-`paired`-${-apostrophe-'\''-\"double quote\"\nsecond-line.md")')
+  'process.stdout.write(".squad/canary-`paired`-${-apostrophe-'\''-\"double quote\".md")')
 git add -- "$CANARY_PATH"
 git commit -m 'test: repo-health post-merge canary'
 git push -u origin HEAD
@@ -50,7 +51,7 @@ exact hostile filename:
 
 ```bash
 EXPECTED=$(node --input-type=module -e \
-  'process.stdout.write(".squad/canary-`paired`-${-apostrophe-'\''-\"double quote\"\nsecond-line.md")')
+  'process.stdout.write(".squad/canary-`paired`-${-apostrophe-'\''-\"double quote\".md")')
 
 gh api --paginate --slurp "repos/bradygaster/squad/issues/$PR_NUMBER/comments" \
   > canary-comments.json

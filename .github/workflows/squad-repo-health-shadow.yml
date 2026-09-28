@@ -48,7 +48,7 @@ jobs:
             echo '# Repo Health PR-head Shadow'
             echo
             echo '> **NON-AUTHORITATIVE:** These scanners came from the PR head and have no write token.'
-            echo '> Only a post-merge canary through `Repo Health` is authoritative for workflow/reporter changes.'
+            printf '%s\n' "> Only a post-merge canary through \`Repo Health\` is authoritative for workflow/reporter changes."
             echo
             echo '## Squad leakage'
             echo '```text'

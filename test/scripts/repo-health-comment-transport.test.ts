@@ -205,7 +205,7 @@ const HOSTILE_MESSAGE =
   'plus a bare ${ opener, an apostrophe \' and a "double quote".\nSecond line of the message.';
 
 const HOSTILE_PATH =
-  '.squad/using-`git cherry-pick`-and-${-an-apostrophe-\'-and-"double quote"\nsecond-line.md';
+  '.squad/using-`git cherry-pick`-and-${-an-apostrophe-\'-and-"double quote".md';
 
 function securityReport() {
   const payload = {
