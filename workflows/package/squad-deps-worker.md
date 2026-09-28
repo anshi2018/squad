@@ -388,6 +388,7 @@ safe-outputs:
         - go.mod
         - go.sum
     excluded-files:
+      - CHANGELOG.md
       - node_modules/**
       - "**/node_modules/**"
       - vendor/**

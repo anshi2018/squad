@@ -35,7 +35,7 @@
       "source": "workflows/package/squad-deps-worker.md",
       "destination": ".github/workflows/squad-deps-worker.md",
       "lock": ".github/workflows/squad-deps-worker.lock.yml",
-      "source_sha256": "e7234fb7e22ad648414f51c1ffa0647e16650c160c1cdbc15c734697e4615e62"
+      "source_sha256": "f800dcb2bf711aac318853fe0d562dbf1f0d8c458c255d4f9a2aea122cdcc47e"
     },
     {
       "name": "squad-retro",
