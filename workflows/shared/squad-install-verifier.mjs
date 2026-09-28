@@ -23,7 +23,7 @@ export const PACKAGE_MANIFEST = 'workflows/aw.yml';
 export const CONTRACT_SOURCE = 'workflows/squad-workflows.manifest.json';
 export const CONTRACT_DESTINATION = '.github/aw/squad-workflows.manifest.json';
 export const MIN_GH_AW_VERSION = 'v0.89.21';
-export const OWNERSHIP_ENTRY_COUNT = 24;
+export const OWNERSHIP_ENTRY_COUNT = 25;
 export const OWNERSHIP_DESTINATION =
   '.github/aw/packages/bradygaster-squad-workflows-3632054824e8.json';
 export const TRIGGER_PROBE = 'shared/squad-bootstrap-trigger-probe.json';
@@ -49,6 +49,7 @@ export const WORKFLOW_TUPLES = deepFreeze([
   ['squad-retro', 'workflows/package/squad-retro.md', '.github/workflows/squad-retro.md', '.github/workflows/squad-retro.lock.yml'],
   ['squad-improvement-worker', 'workflows/package/squad-improvement-worker.md', '.github/workflows/squad-improvement-worker.md', '.github/workflows/squad-improvement-worker.lock.yml'],
   ['squad-bootstrap', 'workflows/package/squad-bootstrap.md', '.github/workflows/squad-bootstrap.md', '.github/workflows/squad-bootstrap.lock.yml'],
+  ['squad-command-router', 'workflows/package/squad-command-router.md', '.github/workflows/squad-command-router.md', '.github/workflows/squad-command-router.lock.yml'],
 ]);
 
 export const RUNTIME_TUPLES = deepFreeze([

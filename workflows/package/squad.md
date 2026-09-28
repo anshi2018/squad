@@ -727,15 +727,12 @@ on:
   bots:
     - github-actions[bot]
   roles: all
-  issues:
-    types:
-      - opened
-      - edited
-      - reopened
-  issue_comment:
-    types:
-      - created
-      - edited
+  slash_command:
+    name: squad
+    events:
+      - issues
+      - issue_comment
+      - pull_request_comment
   workflow_dispatch:
     inputs:
       command:
@@ -749,14 +746,7 @@ on:
         description: Originating agentic workflow context
         required: false
         type: string
-if: |-
-  (github.event_name == 'workflow_dispatch' ||
-   contains(github.event.comment.body, '/squad') ||
-   contains(github.event.issue.body, '/squad')) &&
-  (github.event_name != 'issues' ||
-   github.actor != 'github-actions[bot]' ||
-   github.event.issue.title != '[Research Proposals] Agent-discovered repo opportunities' ||
-   !contains(github.event.issue.body, '<!-- squad:bootstrap-opportunities schema=1 -->'))
+if: github.event_name != 'issues' || github.actor != 'github-actions[bot]' || github.event.issue.title != '[Research Proposals] Agent-discovered repo opportunities' || !contains(github.event.issue.body, '<!-- squad:bootstrap-opportunities schema=1 -->')
 permissions:
   contents: read
   copilot-requests: write

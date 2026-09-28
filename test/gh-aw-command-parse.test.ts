@@ -9,6 +9,10 @@ import {
 } from '../workflows/shared/squad-command-contract.mjs';
 
 const WORKFLOW = readFileSync(join(process.cwd(), 'workflows', 'squad.md'), 'utf8');
+const DISCOVERY_WORKFLOW = readFileSync(
+  join(process.cwd(), 'workflows', 'squad-command-router.md'),
+  'utf8',
+);
 const TEST_ROOT = join(process.cwd(), '.test-workspaces');
 
 const issue = (body: string) => ({
@@ -165,11 +169,7 @@ describe('gh-aw: shared /squad command contract (#1824)', () => {
   });
 
   it('wires both the pre-agent context and safe-output failure to the same committed module', () => {
-    expect(WORKFLOW).not.toContain('slash_command:');
-    expect(WORKFLOW).toContain('issues:\n    types: [opened, edited, reopened]');
-    expect(WORKFLOW).toContain('issue_comment:\n    types: [created, edited]');
-    expect(WORKFLOW).toContain("contains(github.event.comment.body, '/squad')");
-    expect(WORKFLOW).toContain("contains(github.event.issue.body, '/squad')");
+    expect(WORKFLOW).toContain('slash_command:');
     expect(WORKFLOW).toContain('shared/squad-command-contract.mjs');
     expect(WORKFLOW).toContain('Materialize deterministic Squad command context');
     expect(WORKFLOW).toContain('Reject unknown or malformed Squad commands');
@@ -177,6 +177,21 @@ describe('gh-aw: shared /squad command contract (#1824)', () => {
     expect(WORKFLOW).toContain('enforceSquadCommandContract');
     expect(WORKFLOW).toContain('squad-command-context.json');
     expect(WORKFLOW).not.toContain('### Step PC-1: Extract the command argument');
+  });
+
+  it('routes commands outside gh-aw start-only activation through the same contract', () => {
+    expect(DISCOVERY_WORKFLOW).toContain("contains(github.event.issue.body, '/squad')");
+    expect(DISCOVERY_WORKFLOW).toContain("contains(github.event.comment.body, '/squad')");
+    expect(DISCOVERY_WORKFLOW).toContain("startsWith(github.event.issue.body, '/squad ')");
+    expect(DISCOVERY_WORKFLOW).toContain("startsWith(github.event.comment.body, '/squad ')");
+    expect(DISCOVERY_WORKFLOW).toContain('squad-command-contract.mjs');
+    expect(DISCOVERY_WORKFLOW).toContain('classifySquadCommand');
+    expect(DISCOVERY_WORKFLOW).toContain('rejectionComment');
+    expect(DISCOVERY_WORKFLOW).toContain('github.rest.issues.createComment');
+    expect(DISCOVERY_WORKFLOW).toContain('core.setFailed(`Squad rejected command:');
+    expect(DISCOVERY_WORKFLOW).toContain('github.rest.actions.createWorkflowDispatch');
+    expect(DISCOVERY_WORKFLOW).toContain("workflow_id: 'squad.lock.yml'");
+    expect(DISCOVERY_WORKFLOW).toContain("command: result.argumentText || 'cast'");
   });
 
   it('realistic source mutation is caught by the accepted-command fixtures', async () => {

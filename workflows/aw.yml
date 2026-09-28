@@ -19,6 +19,8 @@ includes:
     destination: .github/workflows/squad-improvement-worker.md
   - source: package/squad-bootstrap.md
     destination: .github/workflows/squad-bootstrap.md
+  - source: package/squad-command-router.md
+    destination: .github/workflows/squad-command-router.md
   - skills/gh-aw-enlistment
 resources:
   - source: shared/squad-install-verifier.mjs

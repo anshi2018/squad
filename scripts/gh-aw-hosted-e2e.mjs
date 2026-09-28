@@ -303,8 +303,8 @@ function matchingPriorRunArtifacts(branches, pullRequests, issues) {
 }
 
 export function assertPristineTarget(target, defaultBranch, contract, github = githubAdapter, now = Date.now) {
-  if (contract.workflows.length !== 7 || contract.runtime.length !== 15 || contract.skills.length !== 1) {
-    throw new Error('Trusted package topology must be exactly 7 workflows, 15 runtime resources, and 1 skill.');
+  if (contract.workflows.length !== 8 || contract.runtime.length !== 16 || contract.skills.length !== 1) {
+    throw new Error('Trusted package topology must be exactly 8 workflows, 16 runtime resources, and 1 skill.');
   }
   const defaultBranchSha = github.getDefaultBranchSha(target, defaultBranch);
   assertSha(defaultBranchSha, 'Target default-branch SHA');
@@ -643,8 +643,8 @@ function hosted(args, repositoryRoot) {
   const sourceSha = requireArg(args, 'source_sha');
   const evidence = resolve(requireArg(args, 'evidence'));
   const contract = loadBundleContract(repositoryRoot);
-  if (contract.workflows.length !== 7 || contract.runtime.length !== 15 || contract.skills.length !== 1) {
-    throw new Error('Trusted package topology must be exactly 7 workflows, 15 runtime resources, and 1 skill.');
+  if (contract.workflows.length !== 8 || contract.runtime.length !== 16 || contract.skills.length !== 1) {
+    throw new Error('Trusted package topology must be exactly 8 workflows, 16 runtime resources, and 1 skill.');
   }
   const targetState = authorizeTarget(args, sourceInfo, contract);
   mkdirSync(evidence, { recursive: true });

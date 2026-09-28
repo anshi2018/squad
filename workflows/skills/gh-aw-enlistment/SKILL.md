@@ -11,7 +11,7 @@ tools:
     when: "Every step: preflight identity/auth, requiring Issues, enabling Actions-created PRs, opening and watching the bootstrap PR."
   - name: "gh aw"
     description: "GitHub Agentic Workflows extension (github/gh-aw) — installs and strictly compiles the Squad workflow set."
-    when: "Installing the immutable native Squad package and compiling its seven workflows into deterministic .lock.yml files."
+    when: "Installing the immutable native Squad package and compiling its eight workflows into deterministic .lock.yml files."
 ---
 
 ## Context
@@ -146,7 +146,7 @@ gh aw add "bradygaster/squad/workflows@${SQUAD_SHA}"
 
 The nested `workflows/aw.yml` is the only supported distribution registration.
 It isolates package auto-discovery from unrelated repository skills and agents,
-and installs exactly seven workflows, fifteen runtime resources, and one
+and installs exactly eight workflows, sixteen runtime resources, and one
 `gh-aw-enlistment` skill at the same resolved revision:
 
 - `squad.md` + `squad.lock.yml`
@@ -220,7 +220,7 @@ node .github/workflows/shared/squad-install-verifier.mjs \
 This must run after any first-install approval and before committing. Success
 criteria:
 
-- All seven workflows compile successfully.
+- All eight workflows compile successfully.
 - The **only** permitted warning is the known `squad.md` bot-trigger warning: it
   configures both slash-command and `github-actions[bot]` triggers, and the bot
   trigger is required for controlled worker-continuation dispatches.
