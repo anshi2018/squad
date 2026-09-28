@@ -75,7 +75,7 @@ gh aw compile --strict --approve
 node .github/workflows/shared/squad-install-verifier.mjs --materialize-runtime
 gh aw compile --strict
 
-# 6. Verify package ownership, exact committed bytes, all eight source/lock
+# 6. Verify package ownership, exact committed bytes, all seven source/lock
 # pairs, one coherent revision, and a clean strict recompile.
 node .github/workflows/shared/squad-install-verifier.mjs \
   --verify-install \
@@ -226,7 +226,7 @@ gh aw add "bradygaster/squad/workflows@${SQUAD_SHA}"
 
 The nested `workflows/aw.yml` is the canonical package registration. Its
 package boundary prevents unrelated repository skills or agents from being
-auto-discovered. It installs exactly eight workflows, sixteen runtime
+auto-discovered. It installs exactly seven workflows, fifteen runtime
 resources, one integrity manifest, and one enlistment skill from the same
 resolved commit. The installed top-level workflow set is:
 
@@ -271,7 +271,7 @@ configuration and compiles the workflow definitions into deterministic
 together and the PR contains the exact generated lockfiles that passed.
 
 Strict compilation is necessary but not sufficient. The post-install verifier
-also checks package ownership metadata, exact source and runtime bytes, all eight
+also checks package ownership metadata, exact source and runtime bytes, all seven
 source/lock pairs, and one coherent 40-character revision.
 
 ### Review first-install safe updates
@@ -309,7 +309,7 @@ gh aw compile --strict
 ```
 
 Run this exact command after any required first-install approval and before
-committing. It must report all eight workflows succeeded. `squad.md` currently
+committing. It must report all seven workflows succeeded. `squad.md` currently
 emits one known warning because both slash-command and `github-actions[bot]`
 triggers are configured; the bot trigger is required for controlled worker
 continuation dispatches. Any error or any additional warning is a stop condition.
@@ -357,7 +357,7 @@ editor setting untracked. Delete it if you do not want the local setting, or
 stage it explicitly if your team wants to share it.
 
 > **Troubleshooting:** If the lock files are missing, rerun `gh aw compile
-> --strict`. Do not open or merge the bootstrap PR until all eight source/lock
+> --strict`. Do not open or merge the bootstrap PR until all seven source/lock
 > pairs exist and strict compilation succeeds.
 
 Downloaded workflow audit data is local diagnostic output and should not be
@@ -422,7 +422,7 @@ Use this checklist for the initial bootstrap and after any workflow update:
 |-------|--------|-------------------|
 | Repository readiness | Confirm `.has_issues` is `true`; if it is `false`, enable it before installing workflows | GitHub Issues are available for `/squad` comments and the bootstrap research/proposals issue; insufficient administration permission stops the install before a bootstrap PR is created |
 | Install | Run the seven-workflow `gh aw add` command on a bootstrap branch | All seven `.md`/`.lock.yml` pairs exist, with shared imports, `.github/aw/`, installed skills, and `.gitattributes` included in the diff |
-| Compile | Review any first-install safe-update report, approve only the documented entries, then run `gh aw compile --strict` without approval | All eight workflows succeed, only documented warnings remain, and all sixteen source/lock files exist |
+| Compile | Review any first-install safe-update report, approve only the documented entries, then run `gh aw compile --strict` without approval | All seven workflows succeed, only documented warnings remain, and all fourteen source/lock files exist |
 | Bootstrap review | Open the PR, request `@copilot`, wait for checks, and merge only after human approval | The default branch receives the complete generated install as one human-reviewable change |
 | Automatic bootstrap | Merge the workflow-installation PR | The dedicated workflow creates one draft Cast PR and one linked research-proposals issue from the same validated payload |
 | Cast persistence | Review the Cast PR before merging | The PR contains `.squad/casting/policy.json`, `registry.json`, and `history.json`, plus the team, routing, charters, Copilot agent, and `meet-the-squad.md` |
@@ -606,7 +606,7 @@ merge, change permissions or secrets, or upgrade Squad.
 
 ### Retrospective auto-implementation (opt-in)
 
-The standard install contains all eight workflows, including the dormant
+The standard install contains all seven workflows, including the dormant
 improvement worker. **Report/proposal-only remains the default.** The lifecycle is
 diagnosis → durable action issue → worker → **draft PR** → human review/merge →
 later measurement of closure and recurrence. Retro never edits code, creates a
