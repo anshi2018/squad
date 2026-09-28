@@ -19,6 +19,8 @@ const JOBS = {
       return [
         '## ⚠️ Squad File Leakage Detected',
         '',
+        '> **Authoritative evidence:** base-controlled `pull_request_target` reporter.',
+        '',
         'The following `.squad/` files were modified in this PR:',
         '',
         fileList,
@@ -51,6 +53,8 @@ const JOBS = {
       return [
         '## 🏗️ Architectural Review',
         '',
+        '> **Authoritative evidence:** base-controlled `pull_request_target` reporter.',
+        '',
         parsed.summary,
         '',
         '| Severity | Category | Finding | Files |',
@@ -82,6 +86,8 @@ const JOBS = {
       });
       return [
         '## 🔒 Security Review',
+        '',
+        '> **Authoritative evidence:** base-controlled `pull_request_target` reporter.',
         '',
         parsed.summary,
         '',
