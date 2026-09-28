@@ -166,16 +166,13 @@ describe('gh-aw advisory Squad reviewer', () => {
     expect(relay).toContain('Never call the generic');
   });
 
-  it('limits slash commands to issue and pull request conversation surfaces', () => {
-    const slashCommand = yamlBlock(ROUTER_FRONTMATTER, 'slash_command');
+  it('limits command discovery to issue bodies and conversation comments', () => {
     const guideSection = GUIDE.match(/## Slash commands[\s\S]*?(?=\n## Casting a team)/)?.[0] ?? '';
 
-    expect(listInBlock(slashCommand, 'events')).toEqual([
-      'issues',
-      'issue_comment',
-      'pull_request_comment',
-    ]);
-    expect(slashCommand).not.toContain('pull_request_review_comment');
+    expect(ROUTER_FRONTMATTER).not.toContain('slash_command:');
+    expect(ROUTER_FRONTMATTER).toContain('issues:\n    types: [opened, edited, reopened]');
+    expect(ROUTER_FRONTMATTER).toContain('issue_comment:\n    types: [created, edited]');
+    expect(ROUTER_FRONTMATTER).not.toContain('pull_request_review_comment:');
     expect(ROUTER).toContain('PR conversation comment');
     expect(ROUTER).not.toMatch(/PR review comment|pull request review comment/i);
     expect(guideSection).toContain('PR conversation comment');
