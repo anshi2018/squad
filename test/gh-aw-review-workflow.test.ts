@@ -169,29 +169,40 @@ function assertCompiledGate(lock: string): void {
     step.name === 'Checkout workflow commit for first-install review guard');
   expect(baseCheckout.with.ref).toBe('${{ github.event.pull_request.base.sha || github.workflow_sha }}');
   expect(workflowCheckout.with.ref).toBe('${{ github.workflow_sha }}');
-  expect(steps[guard].with.script).toContain('existsSync(baseGuard) ? baseGuard : workflowGuard');
+  expect(steps[guard].with.script).toContain('if (existsSync(baseGuard))');
+  expect(steps[guard].with.script).toContain('else if (!existsSync(baseManifest))');
+  expect(steps[guard].with.script).toContain('missing from an established base installation');
   const finalGate = review.steps.find((step: { name: string }) =>
     step.name === 'Enforce independent current-head verdict');
-  expect(finalGate.with.script).toContain('existsSync(baseGuard) ? baseGuard : workflowGuard');
+  expect(finalGate.with.script).toContain('if (existsSync(baseGuard))');
+  expect(finalGate.with.script).toContain('else if (!existsSync(baseManifest))');
+  expect(finalGate.with.script).toContain('missing from an established base installation');
   for (const step of review.steps) expect(step['continue-on-error']).toBeUndefined();
   expect(review['continue-on-error']).toBeUndefined();
 }
 
-function safeOutputsGuardScript(lock: string): string {
+function compiledGuardScripts(lock: string): Array<{ name: string; script: string }> {
   const workflow = parse(lock);
-  const step = workflow.jobs.safe_outputs.steps.find((candidate: { name: string }) =>
+  const safeOutputsStep = workflow.jobs.safe_outputs.steps.find((candidate: { name: string }) =>
     candidate.name === 'Bind review output to committed agent identities and current head');
-  expect(step, 'compiled safe_outputs guard step is missing').toBeDefined();
-  return step.with.script;
+  const finalGateStep = workflow.jobs.review.steps.find((candidate: { name: string }) =>
+    candidate.name === 'Enforce independent current-head verdict');
+  expect(safeOutputsStep, 'compiled safe_outputs guard step is missing').toBeDefined();
+  expect(finalGateStep, 'compiled final verdict guard step is missing').toBeDefined();
+  return [
+    { name: 'safe outputs', script: safeOutputsStep.with.script },
+    { name: 'final verdict', script: finalGateStep.with.script },
+  ];
 }
 
 async function executeCompiledGuardLoader(
   script: string,
   {
     baseGuard,
+    baseManifest = false,
     workflowGuard,
     head = 'a'.repeat(40),
-  }: { baseGuard?: string; workflowGuard: string; head?: string },
+  }: { baseGuard?: string; baseManifest?: boolean; workflowGuard: string; head?: string },
 ): Promise<string> {
   const workspace = mkdtempSync(resolve(ROOT, '.squad-review-loader-'));
   compileWorkspaces.push(workspace);
@@ -201,6 +212,15 @@ async function executeCompiledGuardLoader(
     const path = resolve(workspace, '.squad-review-base', guardPath);
     mkdirSync(dirname(path), { recursive: true });
     writeFileSync(path, baseGuard);
+  }
+  if (baseManifest) {
+    const path = resolve(
+      workspace,
+      '.squad-review-base',
+      '.github/aw/squad-workflows.manifest.json',
+    );
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, '{}\n');
   }
   const workflowPath = resolve(workspace, '.squad-review-workflow', guardPath);
   mkdirSync(dirname(workflowPath), { recursive: true });
@@ -419,32 +439,49 @@ describe('gh-aw enforcing Squad reviewer', () => {
 
   it('executes the compiled first-install fallback without weakening established base control', async () => {
     const { lock } = compileReviewer();
-    const script = safeOutputsGuardScript(lock);
     const stub = (source: string) => `
       import { writeFileSync } from 'node:fs';
       export async function enforceReviewOutputs(env) {
         writeFileSync(process.env.SQUAD_TEST_GUARD_OUTPUT,
-          JSON.stringify({ source: ${JSON.stringify(source)}, head: env.SQUAD_REVIEW_HEAD }));
+          JSON.stringify({ source: ${JSON.stringify(source)}, operation: 'safe outputs', head: env.SQUAD_REVIEW_HEAD }));
+      }
+      export async function assertClearingReview(env) {
+        writeFileSync(process.env.SQUAD_TEST_GUARD_OUTPUT,
+          JSON.stringify({ source: ${JSON.stringify(source)}, operation: 'final verdict', head: env.SQUAD_REVIEW_HEAD }));
       }
     `;
 
-    for (const head of [
-      'edd6fbf0f84334ff086ed2bc8bbfed5503fdd56f',
-      '9a898b5182ca432b62bef26dbf1f9022dd1d256b',
-    ]) {
+    for (const { name, script } of compiledGuardScripts(lock)) {
+      const head = name === 'safe outputs'
+        ? 'edd6fbf0f84334ff086ed2bc8bbfed5503fdd56f'
+        : '9a898b5182ca432b62bef26dbf1f9022dd1d256b';
       await expect(executeCompiledGuardLoader(script, {
         workflowGuard: stub('workflow'),
         head,
-      })).resolves.toBe(JSON.stringify({ source: 'workflow', head }));
+      })).resolves.toBe(JSON.stringify({ source: 'workflow', operation: name, head }));
+
+      await expect(executeCompiledGuardLoader(script, {
+        baseGuard: stub('base'),
+        baseManifest: true,
+        workflowGuard: stub('workflow'),
+        head,
+      })).resolves.toBe(JSON.stringify({ source: 'base', operation: name, head }));
+
+      await expect(executeCompiledGuardLoader(script, {
+        baseManifest: true,
+        workflowGuard: stub('workflow'),
+        head,
+      })).rejects.toThrow(
+        'Squad Review guard is missing from an established base installation. Refusing workflow-source fallback.',
+      );
+
+      await expect(executeCompiledGuardLoader(script, {
+        baseGuard: 'this is not valid JavaScript',
+        baseManifest: true,
+        workflowGuard: stub('workflow'),
+        head,
+      })).rejects.toThrow();
     }
-    await expect(executeCompiledGuardLoader(script, {
-      baseGuard: stub('base'),
-      workflowGuard: stub('workflow'),
-    })).resolves.toBe(JSON.stringify({ source: 'base', head: 'a'.repeat(40) }));
-    await expect(executeCompiledGuardLoader(script, {
-      baseGuard: 'this is not valid JavaScript',
-      workflowGuard: stub('workflow'),
-    })).rejects.toThrow();
   }, 30000);
 
   it('kills mutations of every important authority and provenance gate', () => {

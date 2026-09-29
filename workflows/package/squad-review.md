@@ -74,9 +74,21 @@ safe-outputs:
           const { pathToFileURL } = require('node:url');
           const baseGuard =
             `${process.env.GITHUB_WORKSPACE}/.squad-review-base/.github/workflows/shared/squad-review-guard.mjs`;
+          const baseManifest =
+            `${process.env.GITHUB_WORKSPACE}/.squad-review-base/.github/aw/squad-workflows.manifest.json`;
           const workflowGuard =
             `${process.env.GITHUB_WORKSPACE}/.squad-review-workflow/.github/workflows/shared/squad-review-guard.mjs`;
-          const guard = await import(pathToFileURL(existsSync(baseGuard) ? baseGuard : workflowGuard).href);
+          let guardPath;
+          if (existsSync(baseGuard)) {
+            guardPath = baseGuard;
+          } else if (!existsSync(baseManifest)) {
+            guardPath = workflowGuard;
+          } else {
+            throw new Error(
+              'Squad Review guard is missing from an established base installation. Refusing workflow-source fallback.'
+            );
+          }
+          const guard = await import(pathToFileURL(guardPath).href);
           await guard.enforceReviewOutputs(process.env,
             async (route, fields) => (await github.request(`GET /${route}`, fields)).data);
   add-comment:
@@ -142,9 +154,21 @@ jobs:
             const { pathToFileURL } = require('node:url');
             const baseGuard =
               `${process.env.GITHUB_WORKSPACE}/.squad-review-base/.github/workflows/shared/squad-review-guard.mjs`;
+            const baseManifest =
+              `${process.env.GITHUB_WORKSPACE}/.squad-review-base/.github/aw/squad-workflows.manifest.json`;
             const workflowGuard =
               `${process.env.GITHUB_WORKSPACE}/.squad-review-workflow/.github/workflows/shared/squad-review-guard.mjs`;
-            const guard = await import(pathToFileURL(existsSync(baseGuard) ? baseGuard : workflowGuard).href);
+            let guardPath;
+            if (existsSync(baseGuard)) {
+              guardPath = baseGuard;
+            } else if (!existsSync(baseManifest)) {
+              guardPath = workflowGuard;
+            } else {
+              throw new Error(
+                'Squad Review guard is missing from an established base installation. Refusing workflow-source fallback.'
+              );
+            }
+            const guard = await import(pathToFileURL(guardPath).href);
             await guard.assertClearingReview(process.env,
               async (route, fields) => (await github.request(`GET /${route}`, fields)).data);
 ---
