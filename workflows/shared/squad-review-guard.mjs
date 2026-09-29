@@ -1,4 +1,5 @@
 import { readFileSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { evaluateImplementDispatchInputs } from './squad-retro-provenance.mjs';
 
 export const CHECK_NAME = 'Squad Review / review';
@@ -8,6 +9,20 @@ const WORKFLOW = '.github/workflows/squad-review.lock.yml';
 const SHA = /^[0-9a-f]{40}$/;
 const ID = /^[a-z][a-z0-9-]*$/;
 const BOT = 'github-actions[bot]';
+const INSTALL_MANIFEST = '.github/aw/squad-workflows.manifest.json';
+const INSTALL_PACKAGES = '.github/aw/packages';
+const INSTALL_AUTHOR = '@squad/bootstrap-installation';
+const INSTALL_REVIEWER = '@squad/bootstrap-review-workflow';
+const INSTALL_WORKFLOWS = [
+  'squad',
+  'squad-implement-worker',
+  'squad-review',
+  'squad-deps-worker',
+  'squad-retro',
+  'squad-improvement-worker',
+  'squad-bootstrap',
+  'squad-command-router',
+];
 
 function requireThat(condition, message) {
   if (!condition) throw new Error(`Squad review refused: ${message}`);
@@ -88,15 +103,119 @@ async function list(get, route, field) {
   throw new Error('Squad review refused: evidence pagination exceeded bound');
 }
 
-async function committedJson(get, repository, path, ref) {
+async function committedJsonEvidence(get, repository, path, ref, { allowMissing = false } = {}) {
   requireThat(SHA.test(ref), 'invalid committed evidence ref');
-  const file = await get(`repos/${repository}/contents/${path}`, { ref });
+  let file;
+  try {
+    file = await get(`repos/${repository}/contents/${path}`, { ref });
+  } catch (error) {
+    if (allowMissing && error?.status === 404) return undefined;
+    throw error;
+  }
   requireThat(file?.type === 'file' && file.encoding === 'base64' &&
     typeof file.content === 'string' && file.size <= 65536, `unreadable committed ${path}`);
-  return JSON.parse(Buffer.from(file.content, 'base64').toString('utf8'));
+  const content = Buffer.from(file.content, 'base64');
+  return {
+    value: JSON.parse(content.toString('utf8')),
+    sha256: createHash('sha256').update(content).digest('hex'),
+  };
 }
 
-export async function reviewTarget(env, get, { relay = false } = {}) {
+async function committedJson(get, repository, path, ref, options) {
+  return (await committedJsonEvidence(get, repository, path, ref, options))?.value;
+}
+
+function validateFirstInstallManifest(value, guardSha256) {
+  const workflows = Array.isArray(value?.workflows) ? value.workflows : [];
+  const names = workflows.map(entry => entry?.name).sort();
+  const guards = Array.isArray(value?.shared_runtime)
+    ? value.shared_runtime.filter(entry => entry?.path === 'shared/squad-review-guard.mjs')
+    : [];
+  const guard = guards[0];
+  requireThat(value?.schema_version === 1 &&
+    value.package === 'bradygaster/squad/workflows' &&
+    value.revision_policy?.kind === 'immutable-git-commit' &&
+    names.join('\0') === [...INSTALL_WORKFLOWS].sort().join('\0') &&
+    workflows.every(entry =>
+      entry?.destination === `.github/workflows/${entry.name}.md` &&
+      entry?.lock === `.github/workflows/${entry.name}.lock.yml` &&
+      typeof entry?.source_sha256 === 'string' && /^[0-9a-f]{64}$/.test(entry.source_sha256)) &&
+    guards.length === 1 &&
+    guard?.destination === '.github/workflows/shared/squad-review-guard.mjs' &&
+    guard?.ownership === 'manifest' && guard?.sha256 === guardSha256,
+  'invalid committed first-install manifest');
+  return guard;
+}
+
+async function validateFirstInstallPackage(
+  get,
+  repository,
+  ref,
+  manifest,
+  manifestSha256,
+  guardSha256,
+  workflowSource,
+) {
+  const entries = await get(`repos/${repository}/contents/${INSTALL_PACKAGES}`, { ref });
+  requireThat(Array.isArray(entries) && entries.length <= 64,
+    'unreadable committed first-install package provenance');
+  const packages = entries.filter(entry =>
+    entry?.type === 'file' &&
+    /^bradygaster-squad-workflows-[0-9a-f]{12}\.json$/.test(entry.name ?? ''));
+  requireThat(packages.length === 1, 'missing or duplicate first-install package provenance');
+  const provenance = await committedJson(
+    get,
+    repository,
+    `${INSTALL_PACKAGES}/${packages[0].name}`,
+    ref,
+  );
+  const revision = provenance?.resolvedCommit;
+  const sourceMatch = typeof workflowSource === 'string'
+    ? workflowSource.match(
+      /^bradygaster\/squad\/workflows\/package\/squad-review\.md@([0-9a-f]{40})$/,
+    )
+    : undefined;
+  requireThat(provenance?.schemaVersion === 1 &&
+    provenance.package === 'bradygaster/squad/workflows' &&
+    SHA.test(revision ?? '') &&
+    provenance.source === `bradygaster/squad/workflows@${revision}` &&
+    Array.isArray(provenance.files) &&
+    (workflowSource === undefined || sourceMatch?.[1] === revision),
+  'invalid committed first-install package provenance');
+  const files = new Map(provenance.files.map(entry => [entry?.destination, entry]));
+  requireThat(files.size === provenance.files.length,
+    'duplicate committed first-install package paths');
+  const required = [
+    INSTALL_MANIFEST,
+    '.github/workflows/shared/squad-review-guard.mjs',
+    ...INSTALL_WORKFLOWS.flatMap(name => [
+      `.github/workflows/${name}.md`,
+      `.github/workflows/${name}.lock.yml`,
+    ]),
+  ];
+  requireThat(required.every(path =>
+    files.get(path)?.destination === path &&
+    typeof files.get(path)?.sha256 === 'string' &&
+    /^[0-9a-f]{64}$/.test(files.get(path).sha256)),
+  'incomplete committed first-install topology');
+  requireThat(
+    files.get('.github/workflows/shared/squad-review-guard.mjs').sha256 === guardSha256 &&
+    files.get(INSTALL_MANIFEST).sha256 === manifestSha256 &&
+    manifest.package === provenance.package,
+  'first-install package does not bind the executing guard');
+}
+
+export async function reviewTarget(
+  env,
+  get,
+  {
+    relay = false,
+    firstInstall = false,
+    workflowSha,
+    workflowGuardSha256,
+    workflowSource,
+  } = {},
+) {
   const repository = env.GITHUB_REPOSITORY;
   const number = Number(env.SQUAD_REVIEW_PR);
   requireThat(typeof repository === 'string' && /^[\w.-]+\/[\w.-]+$/.test(repository) &&
@@ -120,9 +239,53 @@ export async function reviewTarget(env, get, { relay = false } = {}) {
     requireThat(provenance.ok, 'malformed or duplicate implementation provenance');
     issue = provenance.issue_number;
   }
-  const value = await committedJson(get, repository, '.squad-review.json', pr.head.sha);
-  const registry = await committedJson(get, repository, '.squad/casting/registry.json', pr.base.sha);
-  const attribution = validateAttribution(value, registry, repository, issue ?? value?.issue);
+  const value = await committedJson(
+    get,
+    repository,
+    '.squad-review.json',
+    pr.head.sha,
+    { allowMissing: firstInstall },
+  );
+  let attribution;
+  if (value === undefined) {
+    requireThat(firstInstall === true && relay === false &&
+      env.GITHUB_EVENT_NAME === 'pull_request' &&
+      SHA.test(workflowSha ?? '') && workflowSha === pr.head.sha &&
+      typeof workflowGuardSha256 === 'string' && /^[0-9a-f]{64}$/.test(workflowGuardSha256),
+    'missing committed attribution outside an immutable clean first install');
+    const manifestEvidence = await committedJsonEvidence(
+      get,
+      repository,
+      INSTALL_MANIFEST,
+      pr.head.sha,
+    );
+    const manifest = manifestEvidence.value;
+    validateFirstInstallManifest(manifest, workflowGuardSha256);
+    await validateFirstInstallPackage(
+      get,
+      repository,
+      pr.head.sha,
+      manifest,
+      manifestEvidence.sha256,
+      workflowGuardSha256,
+      workflowSource,
+    );
+    attribution = {
+      schema: 'squad-review-author/v1',
+      repository,
+      issue: issue ?? number,
+      author_agent: INSTALL_AUTHOR,
+      reviewer_agent: INSTALL_REVIEWER,
+    };
+  } else {
+    const registry = await committedJson(
+      get,
+      repository,
+      '.squad/casting/registry.json',
+      pr.base.sha,
+    );
+    attribution = validateAttribution(value, registry, repository, issue ?? value?.issue);
+  }
   return {
     repository, pull_request: number, head_sha: pr.head.sha,
     author_agent: attribution.author_agent, reviewer_agent: attribution.reviewer_agent, pr,
@@ -138,9 +301,11 @@ async function currentEvidence(target, get) {
     String(review.body ?? '').includes(VERDICT_PREFIX.trim()));
 }
 
-export async function enforceReviewOutputs(env, get) {
+export async function enforceReviewOutputs(env, get, options = {}) {
   requireThat(['pull_request', 'workflow_dispatch'].includes(env.GITHUB_EVENT_NAME), 'invalid event');
-  const target = await reviewTarget(env, get);
+  requireThat(options.firstInstall !== true || typeof options.workflowSource === 'string',
+    'first-install output binding requires immutable workflow source provenance');
+  const target = await reviewTarget(env, get, options);
   const output = JSON.parse(readFileSync(env.GH_AW_AGENT_OUTPUT, 'utf8'));
   requireThat(Array.isArray(output.items), 'missing safe-output items');
   const verdicts = output.items.filter(item => item.type === 'submit_pull_request_review');
@@ -183,13 +348,14 @@ export async function enforceReviewOutputs(env, get) {
   // not a native bot approval/rejection, drives the independent status check.
   item.event = 'COMMENT';
   // Native review commit binding and a final live read prevent stale agent output passing.
-  await reviewTarget(env, get);
+  await reviewTarget(env, get, options);
   writeFileSync(env.GH_AW_AGENT_OUTPUT, JSON.stringify(output));
 }
 
-export async function assertClearingReview(env, get, { relay = false } = {}) {
+export async function assertClearingReview(env, get, options = {}) {
+  const { relay = false } = options;
   requireThat(env.GITHUB_EVENT_NAME === 'pull_request', 'only PR runs can clear review');
-  const target = await reviewTarget(env, get, { relay });
+  const target = await reviewTarget(env, get, options);
   const candidates = await currentEvidence(target, get);
   requireThat(candidates.length === 1, 'missing or duplicate verdict evidence');
   const review = candidates[0];
@@ -248,6 +414,6 @@ export async function assertClearingReview(env, get, { relay = false } = {}) {
       `repos/${target.repository}/collaborators/${comment.user.login}/permission`);
     requireThat(permission.permission === 'admin', 'override requires repository administrator');
   }
-  await reviewTarget(env, get, { relay });
+  await reviewTarget(env, get, options);
   return verdict;
 }
