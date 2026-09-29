@@ -27,6 +27,7 @@ import {
 import {
   CONTRACT_DESTINATION,
   CONTRACT_SOURCE,
+  MIN_GH_AW_VERSION,
   OWNERSHIP_ENTRY_COUNT,
   PACKAGE_NAME,
   RUNTIME_TUPLES,
@@ -3630,21 +3631,9 @@ describe('gh-aw: canonical package integrity contract', () => {
   });
 
   it('normalizes only compiler-declared repository-scattered schedules', () => {
-    const setupPin = '924af5fdc64061cfbf66fb584c8b07e2ac230c60';
-    const metadata = `# gh-aw-metadata: ${JSON.stringify({
-      frontmatter_hash: 'a'.repeat(64),
-      compiler_version: 'v0.89.21',
-    })}`;
+    const metadata = `# gh-aw-metadata: {"frontmatter_hash":"${'a'.repeat(64)}"}`;
     const lock = [
       metadata,
-      `# gh-aw-manifest: ${JSON.stringify({
-        actions: [{
-          repo: 'github/gh-aw-actions/setup',
-          sha: setupPin,
-          version: 'v0.89.21',
-        }],
-      })}`,
-      `uses: github/gh-aw-actions/setup@${setupPin}`,
       `source_revision: ${revisionA}`,
       '      - cron: "17 4 * * 2" # Friendly format: weekly on Tuesday at 04:00 (scattered)',
       '      - cron: "0 4 * * 2" # Fixed schedule',
@@ -3658,57 +3647,14 @@ describe('gh-aw: canonical package integrity contract', () => {
     expect(normalized).not.toContain(revisionA);
   });
 
-  it('normalizes only the approved gh-aw setup tag to its exact compiler pin', () => {
-    const setupPin = '924af5fdc64061cfbf66fb584c8b07e2ac230c60';
-    const compiled = (setupRef: string, permissions = 'checks: read') => [
-      `# gh-aw-metadata: ${JSON.stringify({
-        schema_version: 'v4',
-        frontmatter_hash: 'a'.repeat(64),
-        body_hash: 'b'.repeat(64),
-        compiler_version: 'v0.89.21',
-        strict: true,
-      })}`,
-      `# gh-aw-manifest: ${JSON.stringify({
-        version: 1,
-        secrets: ['SQUAD_REVIEW_APP_PRIVATE_KEY'],
-        actions: [{
-          repo: 'github/gh-aw-actions/setup',
-          sha: setupRef,
-          version: 'v0.89.21',
-        }],
-      })}`,
-      `#   - github/gh-aw-actions/setup@${setupRef}${setupRef === setupPin ? ' # v0.89.21' : ''}`,
-      `source_revision: ${revisionA}`,
-      'permissions:',
-      `  ${permissions}`,
-      'environment: squad-review-authority',
-      'github-token: ${{ steps.squad-review-app-token.outputs.token }}',
-      `uses: github/gh-aw-actions/setup@${setupRef}${setupRef === setupPin ? ' # v0.89.21' : ''}`,
-    ].join('\n');
-    const macOS = normalizeCompiledLock(compiled(setupPin), revisionA);
-    const linux = normalizeCompiledLock(compiled('v0.89.21'), revisionA);
+  it('pins every CI compiler install to the package minimum gh-aw version', () => {
+    const ci = readText(join(process.cwd(), '.github/workflows/squad-ci.yml'));
+    const pins = [...ci.matchAll(
+      /gh extension install(?: --force)? --pin (v[0-9.]+) github\/gh-aw/g,
+    )].map(match => match[1]);
 
-    expect(linux).toBe(macOS);
-    expect(linux).toContain(`github/gh-aw-actions/setup@${setupPin}`);
-    expect(linux).not.toContain('github/gh-aw-actions/setup@v0.89.21');
-    expect(() => normalizeCompiledLock(compiled('c'.repeat(40)), revisionA))
-      .toThrow(/approved compiler pin/);
-    expect(normalizeCompiledLock(compiled(setupPin, 'checks: write'), revisionA))
-      .not.toBe(macOS);
-    expect(normalizeCompiledLock(
-      compiled(setupPin).replace(
-        'environment: squad-review-authority',
-        'environment: unrestricted',
-      ),
-      revisionA,
-    )).not.toBe(macOS);
-    expect(normalizeCompiledLock(
-      compiled(setupPin).replace(
-        'github-token: ${{ steps.squad-review-app-token.outputs.token }}',
-        'github-token: ${{ github.token }}',
-      ),
-      revisionA,
-    )).not.toBe(macOS);
+    expect(pins).toHaveLength(2);
+    expect(new Set(pins)).toEqual(new Set([MIN_GH_AW_VERSION]));
   });
 
   it('accepts only the deterministic retained bootstrap trigger sentinel', () => {

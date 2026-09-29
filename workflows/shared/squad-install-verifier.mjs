@@ -33,9 +33,6 @@ export const TRIGGER_PROBE_DESTINATION =
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const REVISION_PATTERN = /^[0-9a-f]{40}$/;
 const LOCK_REVISION_PLACEHOLDER = 'f'.repeat(40);
-const GH_AW_SETUP_PINS = Object.freeze({
-  'v0.89.21': '924af5fdc64061cfbf66fb584c8b07e2ac230c60',
-});
 
 function deepFreeze(value) {
   if (value && typeof value === 'object' && !Object.isFrozen(value)) {
@@ -351,46 +348,8 @@ export function normalizeCompiledLock(content, revision) {
     /^(# gh-aw-metadata: \{[^\n]*"frontmatter_hash":")([0-9a-f]{64})("[^\n]*\})$/m,
   );
   if (!metadata) throw new Error('Compiled lock has missing or malformed gh-aw metadata.');
-  const compilerVersion = JSON.parse(metadata[0].slice('# gh-aw-metadata: '.length))
-    .compiler_version;
-  const setupPin = GH_AW_SETUP_PINS[compilerVersion];
-  if (!setupPin) {
-    throw new Error(`Compiled lock uses unsupported gh-aw compiler version: ${compilerVersion}.`);
-  }
-  const manifest = text.match(/^(# gh-aw-manifest: )(\{[^\n]*\})$/m);
-  if (!manifest) throw new Error('Compiled lock has missing or malformed gh-aw manifest.');
-  const manifestValue = JSON.parse(manifest[2]);
-  const setupActions = manifestValue.actions?.filter(
-    action => action.repo === 'github/gh-aw-actions/setup',
-  ) ?? [];
-  if (setupActions.length !== 1) {
-    throw new Error('Compiled lock must declare exactly one gh-aw setup action.');
-  }
-  const setupAction = setupActions[0];
-  if (setupAction.version !== compilerVersion) {
-    throw new Error('Compiled lock gh-aw setup action version does not match its compiler.');
-  }
-  if (![compilerVersion, setupPin].includes(setupAction.sha)) {
-    throw new Error('Compiled lock gh-aw setup action does not match the approved compiler pin.');
-  }
-  setupAction.sha = setupPin;
-  const setupRefs = [
-    ...text.matchAll(/github\/gh-aw-actions\/setup@([^\s#'"]+)/g),
-  ].map(match => match[1]);
-  if (setupRefs.some(ref => ![compilerVersion, setupPin].includes(ref))) {
-    throw new Error('Compiled lock contains an unapproved gh-aw setup action reference.');
-  }
   return text
     .replace(metadata[0], `${metadata[1]}${'0'.repeat(64)}${metadata[3]}`)
-    .replace(manifest[0], `${manifest[1]}${JSON.stringify(manifestValue)}`)
-    .replaceAll(
-      `github/gh-aw-actions/setup@${compilerVersion}`,
-      `github/gh-aw-actions/setup@${setupPin}`,
-    )
-    .replaceAll(
-      `github/gh-aw-actions/setup@${setupPin} # ${compilerVersion}`,
-      `github/gh-aw-actions/setup@${setupPin}`,
-    )
     .replace(
       /^(\s*-\s+cron:\s+)"[^"]+"(\s+# Friendly format: .+ \(scattered\))$/gm,
       '$1"<repository-scattered>"$2',
