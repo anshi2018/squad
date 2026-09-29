@@ -572,10 +572,16 @@ function waitForBaseControlledReviewCanary(target, castPr, evidence) {
       'api',
       '-H', 'Accept: application/vnd.github+json',
       `repos/${target}/commits/${castPr.headSha}/check-runs`,
-      '--jq', '{check_runs:[.check_runs[] | {id,name,status,conclusion,app:{slug:.app.slug}}]}',
+      '--jq', '{check_runs:[.check_runs[] | {id,name,status,conclusion,head_sha,external_id,details_url,completed_at,output:{summary:.output.summary},app:{id:.app.id,slug:.app.slug}}]}',
     ]).check_runs;
+    const externalId =
+      `squad-review-authority/v1:${target}:${castPr.number}:${castPr.baseSha}:${castPr.headSha}`;
     const trustedChecks = checks.filter((check) =>
-      check.name === 'Squad Review / review' && check.app?.slug === 'github-actions');
+      check.name === 'Squad Review / review' &&
+      check.external_id === externalId &&
+      check.head_sha === castPr.headSha &&
+      check.app?.id === 15368 &&
+      check.app?.slug === 'github-actions');
     if (trustedChecks.length > 1) {
       throw new Error(`Expected one base-controlled Squad Review canary check; found ${trustedChecks.length}.`);
     }
@@ -611,15 +617,31 @@ function waitForBaseControlledReviewCanary(target, castPr, evidence) {
         || verdict.author_agent !== '@squad/base-controlled-bootstrap'
         || verdict.reviewer_agent !== '@squad/base-controlled-review'
         || verdict.result !== 'COMMENT'
-        || verdict.event !== 'pull_request'
+        || verdict.event !== 'pull_request_target'
+        || verdict.workflow_sha !== castPr.baseSha
         || verdict.workflow_path !== '.github/workflows/squad-review.lock.yml') {
         throw new Error('Squad Review canary verdict is not bound to the base-controlled bootstrap activation.');
+      }
+      const attestation = JSON.parse(check.output?.summary ?? '');
+      if (attestation.schema !== 'squad-review-check/v1'
+        || attestation.repository !== target
+        || attestation.pull_request !== castPr.number
+        || attestation.base_sha !== castPr.baseSha
+        || attestation.head_sha !== castPr.headSha
+        || attestation.workflow_sha !== castPr.baseSha
+        || attestation.run_id !== verdict.run_id
+        || attestation.event !== 'pull_request_target'
+        || attestation.workflow_path !== '.github/workflows/squad-review.lock.yml'
+        || attestation.authority_job !== 'Squad Review Authority / attest'
+        || check.details_url !== `https://github.com/${target}/actions/runs/${verdict.run_id}`) {
+        throw new Error('Squad Review canary check is not bound to the base-controlled authority run.');
       }
       writeJson(resolve(evidence, 'base-controlled-review-canary.json'), {
         pull_request: castPr,
         check,
         review: verdicts[0],
         verdict,
+        attestation,
       });
       return { check, verdict };
     }

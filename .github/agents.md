@@ -35,8 +35,9 @@ GitHub Agentic Workflows (`gh-aw`) are composable AI workflows triggered by slas
 > the repository's default branch.
 > The installation PR is a manual trust boundary: its PR-controlled workflow
 > cannot mint a trusted Squad verdict. After merge, require the automatically
-> opened Cast PR to pass `Squad Review / review` using the base-controlled guard
-> before treating bootstrap or lifecycle automation as trusted.
+> opened Cast PR to pass the exact-head `Squad Review / review` attestation from
+> the base-controlled `pull_request_target` authority before treating bootstrap
+> or lifecycle automation as trusted.
 
 The quick start installs this workflow set:
 

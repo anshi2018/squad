@@ -5,11 +5,16 @@ export const CHECK_NAME = 'Squad Review / review';
 export const VERDICT_PREFIX = 'Squad-Review-Verdict: ';
 export const OVERRIDE_PREFIX = 'Squad-Review-Override: ';
 const WORKFLOW = '.github/workflows/squad-review.lock.yml';
+const AUTHORITY_JOB = 'Squad Review Authority / attest';
+const CHECK_SCHEMA = 'squad-review-check/v1';
+const CHECK_EXTERNAL_ID = 'squad-review-authority/v1';
 const BOOTSTRAP_WORKFLOW = '.github/workflows/squad-bootstrap.lock.yml';
 const SHA = /^[0-9a-f]{40}$/;
 const ID = /^[a-z][a-z0-9-]*$/;
 const BOT = 'github-actions[bot]';
 const BOT_ID = 41898282;
+const ACTIONS_APP_ID = 15368;
+const ACTIONS_APP_SLUG = 'github-actions';
 const BOOTSTRAP_BRANCH = 'squad/bootstrap-cast';
 const BOOTSTRAP_TITLE = '[squad] Cast your Squad';
 const BOOTSTRAP_AUTHOR = '@squad/base-controlled-bootstrap';
@@ -64,7 +69,7 @@ export function validateVerdict(value, expected, review, now = Date.now()) {
   requireThat(exactKeys(value, [
     'schema', 'repository', 'pull_request', 'base_sha', 'head_sha', 'author_agent',
     'reviewer_agent', 'result', 'timestamp', 'run_id', 'run_attempt', 'event',
-    'workflow_path',
+    'workflow_path', 'workflow_sha',
   ]) && value.schema === 'squad-review-verdict/v1', 'invalid verdict shape');
   for (const key of [
     'repository', 'pull_request', 'base_sha', 'head_sha', 'author_agent', 'reviewer_agent',
@@ -75,9 +80,11 @@ export function validateVerdict(value, expected, review, now = Date.now()) {
     value.author_agent !== value.reviewer_agent,
     'invalid SHA or self review');
   requireThat(['COMMENT', 'REQUEST_CHANGES'].includes(value.result) &&
-    value.event === 'pull_request' && Number.isSafeInteger(value.run_id) && value.run_id > 0 &&
+    value.event === 'pull_request_target' &&
+    Number.isSafeInteger(value.run_id) && value.run_id > 0 &&
     Number.isSafeInteger(value.run_attempt) && value.run_attempt > 0 &&
-    value.workflow_path === WORKFLOW, 'invalid verdict result or run');
+    value.workflow_path === WORKFLOW && value.workflow_sha === expected.workflow_sha,
+  'invalid verdict result or run');
   requireThat(review.user?.login === BOT && review.user?.id === BOT_ID &&
     review.user?.type === 'Bot' && review.commit_id === value.head_sha &&
     review.state === 'COMMENTED',
@@ -212,11 +219,17 @@ export async function reviewTarget(
   requireThat(typeof repository === 'string' && /^[\w.-]+\/[\w.-]+$/.test(repository) &&
     /^[1-9]\d*$/.test(env.SQUAD_REVIEW_PR ?? '') && Number.isSafeInteger(number), 'invalid target');
   const pr = await get(`repos/${repository}/pulls/${number}`);
+  const repo = await get(`repos/${repository}`);
   requireThat(pr.number === number && pr.head?.repo?.full_name === repository &&
     pr.base?.repo?.full_name === repository && SHA.test(pr.head.sha) && SHA.test(pr.base.sha),
   'foreign repository or invalid PR');
+  requireThat(repo?.full_name === repository && typeof repo.default_branch === 'string' &&
+    pr.base.ref === repo.default_branch, 'review target must use the repository default branch');
   requireThat(SHA.test(env.SQUAD_REVIEW_HEAD ?? '') && pr.head.sha === env.SQUAD_REVIEW_HEAD,
     'PR head changed or expected SHA missing');
+  requireThat(SHA.test(env.SQUAD_REVIEW_WORKFLOW_SHA ?? '') &&
+    env.SQUAD_REVIEW_WORKFLOW_SHA === pr.base.sha,
+  'workflow source is not the exact PR base commit');
   requireThat(relay
     ? pr.merged === true && pr.state === 'closed' &&
       pr.base.ref === env.SQUAD_REVIEW_DEFAULT_BRANCH
@@ -239,7 +252,7 @@ export async function reviewTarget(
   );
   let attribution;
   if (value === undefined) {
-    requireThat(relay === false && env.GITHUB_EVENT_NAME === 'pull_request',
+    requireThat(relay === false && env.GITHUB_EVENT_NAME === 'pull_request_target',
       'missing committed attribution outside base-controlled bootstrap activation');
     attribution = await validateBootstrapAttribution(
       get,
@@ -258,6 +271,7 @@ export async function reviewTarget(
   }
   return {
     repository, pull_request: number, base_sha: pr.base.sha, head_sha: pr.head.sha,
+    workflow_sha: env.SQUAD_REVIEW_WORKFLOW_SHA,
     author_agent: attribution.author_agent, reviewer_agent: attribution.reviewer_agent, pr,
   };
 }
@@ -272,7 +286,8 @@ async function currentEvidence(target, get) {
 }
 
 export async function enforceReviewOutputs(env, get, options = {}) {
-  requireThat(env.GITHUB_EVENT_NAME === 'pull_request', 'only PR runs can emit review output');
+  requireThat(env.GITHUB_EVENT_NAME === 'pull_request_target',
+    'only base-controlled PR target runs can emit review output');
   const target = await reviewTarget(env, get, options);
   const output = JSON.parse(readFileSync(env.GH_AW_AGENT_OUTPUT, 'utf8'));
   requireThat(Array.isArray(output.items), 'missing safe-output items');
@@ -305,8 +320,9 @@ export async function enforceReviewOutputs(env, get, options = {}) {
     timestamp: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
     run_id: Number(env.GITHUB_RUN_ID),
     run_attempt: Number(env.GITHUB_RUN_ATTEMPT),
-    event: 'pull_request',
+    event: 'pull_request_target',
     workflow_path: WORKFLOW,
+    workflow_sha: target.workflow_sha,
   };
   requireThat(Number.isSafeInteger(value.run_id) && value.run_id > 0 &&
     Number.isSafeInteger(value.run_attempt) && value.run_attempt > 0, 'invalid workflow identity');
@@ -321,7 +337,8 @@ export async function enforceReviewOutputs(env, get, options = {}) {
 
 export async function assertClearingReview(env, get, options = {}) {
   const { relay = false } = options;
-  requireThat(env.GITHUB_EVENT_NAME === 'pull_request', 'only PR runs can clear review');
+  requireThat(env.GITHUB_EVENT_NAME === 'pull_request_target',
+    'only base-controlled PR target runs can clear review');
   const target = await reviewTarget(env, get, {
     ...options,
     requireBootstrapRunSuccess: true,
@@ -342,8 +359,8 @@ export async function assertClearingReview(env, get, options = {}) {
   const { review, verdict } = bound[0];
   const cutoff = relay ? timestamp(target.pr.merged_at) : Date.now();
   const run = await get(`repos/${target.repository}/actions/runs/${verdict.run_id}`);
-  requireThat(run.event === 'pull_request' && run.path === WORKFLOW &&
-    run.repository?.full_name === target.repository && run.head_sha === target.head_sha &&
+  requireThat(run.event === 'pull_request_target' && run.path === WORKFLOW &&
+    run.repository?.full_name === target.repository && run.head_sha === target.workflow_sha &&
     run.run_attempt >= verdict.run_attempt &&
     run.display_title === `Squad review \u2014 PR #${target.pull_request}` &&
     Array.isArray(run.pull_requests) &&
@@ -352,9 +369,9 @@ export async function assertClearingReview(env, get, options = {}) {
   'verdict is not bound to this PR workflow run');
   const attempt = run.run_attempt === verdict.run_attempt ? run :
     await get(`repos/${target.repository}/actions/runs/${verdict.run_id}/attempts/${verdict.run_attempt}`);
-  requireThat(attempt.event === 'pull_request' && attempt.path === WORKFLOW &&
+  requireThat(attempt.event === 'pull_request_target' && attempt.path === WORKFLOW &&
     attempt.repository?.full_name === target.repository &&
-    attempt.head_sha === target.head_sha &&
+    attempt.head_sha === target.workflow_sha &&
     attempt.run_attempt === verdict.run_attempt &&
     timestamp(attempt.run_started_at) <= timestamp(verdict.timestamp) &&
     (attempt.status !== 'completed' ||
@@ -363,9 +380,36 @@ export async function assertClearingReview(env, get, options = {}) {
     requireThat(run.status === 'completed' && run.conclusion === 'success', 'review run did not succeed');
     const jobs = await list(get,
       `repos/${target.repository}/actions/runs/${verdict.run_id}/attempts/${run.run_attempt}/jobs`, 'jobs');
-    const checks = jobs.filter(job => job.name === CHECK_NAME);
-    requireThat(checks.length === 1 && checks[0].conclusion === 'success' &&
-      timestamp(checks[0].completed_at) <= cutoff, 'required review check did not pass before merge');
+    const authorityJobs = jobs.filter(job => job.name === AUTHORITY_JOB);
+    requireThat(authorityJobs.length === 1 && authorityJobs[0].conclusion === 'success' &&
+      timestamp(authorityJobs[0].completed_at) <= cutoff,
+    'base-controlled review authority job did not pass before merge');
+    const checkRuns = await list(get,
+      `repos/${target.repository}/commits/${target.head_sha}/check-runs`, 'check_runs');
+    const externalId =
+      `${CHECK_EXTERNAL_ID}:${target.repository}:${target.pull_request}:${target.base_sha}:${target.head_sha}`;
+    const checks = checkRuns.filter(check => check.name === CHECK_NAME &&
+      check.external_id === externalId);
+    requireThat(checks.length === 1, 'missing or duplicate exact-head authority check');
+    const check = checks[0];
+    requireThat(check.head_sha === target.head_sha && check.status === 'completed' &&
+      check.conclusion === 'success' && check.app?.id === ACTIONS_APP_ID &&
+      check.app?.slug === ACTIONS_APP_SLUG &&
+      check.details_url ===
+        `${env.GITHUB_SERVER_URL ?? 'https://github.com'}/${target.repository}/actions/runs/${verdict.run_id}`,
+    'required review check is not attributable to GitHub Actions authority');
+    const summary = JSON.parse(check.output?.summary ?? '');
+    requireThat(exactKeys(summary, [
+      'schema', 'repository', 'pull_request', 'base_sha', 'head_sha', 'workflow_sha',
+      'run_id', 'run_attempt', 'event', 'workflow_path', 'authority_job',
+    ]) && summary.schema === CHECK_SCHEMA && summary.repository === target.repository &&
+      summary.pull_request === target.pull_request && summary.base_sha === target.base_sha &&
+      summary.head_sha === target.head_sha && summary.workflow_sha === target.workflow_sha &&
+      summary.run_id === verdict.run_id && summary.run_attempt === run.run_attempt &&
+      summary.event === 'pull_request_target' && summary.workflow_path === WORKFLOW &&
+      summary.authority_job === AUTHORITY_JOB &&
+      timestamp(check.completed_at) <= cutoff,
+    'required review check attestation is invalid');
   }
   if (verdict.result === 'REQUEST_CHANGES') {
     const comments = await list(get, `repos/${target.repository}/issues/${target.pull_request}/comments`);

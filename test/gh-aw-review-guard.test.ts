@@ -27,9 +27,11 @@ afterEach(() => {
 function fixture(relay = false) {
   vi.spyOn(Date, 'now').mockReturnValue(NOW);
   const env = {
-    GITHUB_EVENT_NAME: 'pull_request', GITHUB_REPOSITORY: REPOSITORY,
+    GITHUB_EVENT_NAME: 'pull_request_target', GITHUB_REPOSITORY: REPOSITORY,
+    GITHUB_SERVER_URL: 'https://github.com',
     GITHUB_RUN_ID: '17', GITHUB_RUN_ATTEMPT: '1',
-    SQUAD_REVIEW_PR: '42', SQUAD_REVIEW_HEAD: HEAD, SQUAD_REVIEW_DEFAULT_BRANCH: 'dev',
+    SQUAD_REVIEW_PR: '42', SQUAD_REVIEW_HEAD: HEAD,
+    SQUAD_REVIEW_WORKFLOW_SHA: BASE, SQUAD_REVIEW_DEFAULT_BRANCH: 'dev',
   };
   const attribution = {
     schema: 'squad-review-author/v1', repository: REPOSITORY, issue: 9,
@@ -53,8 +55,9 @@ function fixture(relay = false) {
   const verdict = {
     schema: 'squad-review-verdict/v1', repository: REPOSITORY, pull_request: 42,
     base_sha: BASE, head_sha: HEAD, author_agent: 'implementer', reviewer_agent: 'reviewer',
-    result: 'COMMENT', timestamp: ISSUED, run_id: 17, run_attempt: 1, event: 'pull_request',
-    workflow_path: '.github/workflows/squad-review.lock.yml',
+    result: 'COMMENT', timestamp: ISSUED, run_id: 17, run_attempt: 1,
+    event: 'pull_request_target', workflow_path: '.github/workflows/squad-review.lock.yml',
+    workflow_sha: BASE,
   };
   const review = {
     id: 123, user: { login: 'github-actions[bot]', id: 41898282, type: 'Bot' }, commit_id: HEAD,
@@ -62,13 +65,43 @@ function fixture(relay = false) {
     body: '',
   };
   const run = {
-    event: 'pull_request', path: '.github/workflows/squad-review.lock.yml',
+    event: 'pull_request_target', path: '.github/workflows/squad-review.lock.yml',
     display_title: 'Squad review \u2014 PR #42',
-    repository: { full_name: REPOSITORY }, head_sha: HEAD, run_attempt: 1,
+    repository: { full_name: REPOSITORY }, head_sha: BASE, run_attempt: 1,
     pull_requests: [{ number: 42, head: { sha: HEAD }, base: { repo: { name: 'example' } } }],
     run_started_at: START, updated_at: FINISHED, status: 'completed', conclusion: 'success',
   };
-  const jobs = [{ name: CHECK_NAME, conclusion: 'success', completed_at: FINISHED }];
+  const jobs = [{
+    name: 'Squad Review Authority / attest',
+    conclusion: 'success',
+    completed_at: FINISHED,
+  }];
+  const checkRuns = [{
+    id: 88,
+    name: CHECK_NAME,
+    external_id: `squad-review-authority/v1:${REPOSITORY}:42:${BASE}:${HEAD}`,
+    head_sha: HEAD,
+    status: 'completed',
+    conclusion: 'success',
+    completed_at: FINISHED,
+    details_url: `https://github.com/${REPOSITORY}/actions/runs/17`,
+    app: { id: 15368, slug: 'github-actions' },
+    output: {
+      summary: JSON.stringify({
+        schema: 'squad-review-check/v1',
+        repository: REPOSITORY,
+        pull_request: 42,
+        base_sha: BASE,
+        head_sha: HEAD,
+        workflow_sha: BASE,
+        run_id: 17,
+        run_attempt: 1,
+        event: 'pull_request_target',
+        workflow_path: '.github/workflows/squad-review.lock.yml',
+        authority_job: 'Squad Review Authority / attest',
+      }),
+    },
+  }];
   const bootstrapRun = {
     event: 'push', path: '.github/workflows/squad-bootstrap.lock.yml',
     repository: { full_name: REPOSITORY }, head_sha: BASE, head_branch: 'dev',
@@ -100,6 +133,9 @@ function fixture(relay = false) {
       if (state.changeAfterFirstRead && state.prReads > 1) pr.head.sha = BASE;
       return structuredClone(pr);
     }
+    if (route === `repos/${REPOSITORY}`) {
+      return { full_name: REPOSITORY, default_branch: 'dev' };
+    }
     if (route.endsWith('/contents/.squad-review.json')) {
       expect(fields?.ref).toBe(HEAD);
       if (state.missingManifest) {
@@ -116,6 +152,7 @@ function fixture(relay = false) {
     if (route.endsWith('/actions/runs/29')) return bootstrapRun;
     if (route.endsWith('/attempts/1')) return { ...run, run_attempt: 1, run_started_at: START };
     if (/\/attempts\/[12]\/jobs$/.test(route)) return { jobs };
+    if (route.endsWith(`/commits/${HEAD}/check-runs`)) return { check_runs: checkRuns };
     if (route.endsWith('/comments')) return state.comments;
     if (route.endsWith('/permission')) return { permission: state.permission };
     throw new Error(`Unexpected API route: ${route}`);
@@ -126,7 +163,8 @@ function fixture(relay = false) {
   };
   sync();
   return {
-    env, attribution, registry, pr, verdict, review, run, bootstrapRun, jobs, override, comment,
+    env, attribution, registry, pr, verdict, review, run, bootstrapRun, jobs, checkRuns,
+    override, comment,
     state, encode, get, sync,
   };
 }
@@ -244,6 +282,22 @@ describe('independent Squad review guard', () => {
     }
   });
 
+  it('refuses PR-controlled shaped review, job, check, and artifact evidence', async () => {
+    const f = fixture(true);
+    f.run.event = 'pull_request';
+    f.run.head_sha = HEAD;
+    f.jobs[0].name = CHECK_NAME;
+    f.checkRuns[0].external_id =
+      `squad-review-authority/v1:${REPOSITORY}:42:${BASE}:${HEAD}`;
+    f.checkRuns[0].output.summary = JSON.stringify({
+      ...JSON.parse(f.checkRuns[0].output.summary),
+      event: 'pull_request',
+      workflow_sha: HEAD,
+    });
+    await expect(assertClearingReview(f.env, f.get, { relay: true }))
+      .rejects.toThrow('not bound to this PR workflow run');
+  });
+
   it.each([
     ['schema', 'other'], ['repository', 'other/repo'], ['issue', 10], ['issue', '9'],
     ['author_agent', 'missing'], ['reviewer_agent', 'missing'],
@@ -277,7 +331,7 @@ describe('independent Squad review guard', () => {
     ['timestamp', '2026-09-28T12:05:00Z'], ['timestamp', '2026-09-28T11:00:00Z'],
     ['timestamp', '2026-02-30T12:01:00Z'],
     ['run_id', 0], ['run_id', '17'], ['run_attempt', 0], ['event', 'workflow_dispatch'],
-    ['workflow_path', '.github/workflows/attacker.yml'],
+    ['workflow_path', '.github/workflows/attacker.yml'], ['workflow_sha', HEAD],
   ])('refuses verdict mutation %s=%s at the real relay', async (key, value) => {
     const f = fixture(true);
     Object.assign(f.verdict, { [key]: value });
@@ -301,6 +355,7 @@ describe('independent Squad review guard', () => {
     'wrong-branch', 'duplicate-marker', 'stale-head', 'foreign-head', 'foreign-base', 'head-race',
     'not-merged', 'wrong-base', 'merge-before-review', 'merge-before-check',
     'failed-run', 'failed-check', 'missing-check', 'duplicate-check', 'wrong-check',
+    'forged-check', 'wrong-check-app', 'wrong-check-attestation',
     'manual-run', 'wrong-workflow', 'wrong-run-repo', 'wrong-run-sha', 'wrong-run-pr',
     'wrong-run-attempt', 'wrong-run-title', 'verdict-before-run',
     'wrong-bot-id', 'wrong-bot-type',
@@ -336,13 +391,19 @@ describe('independent Squad review guard', () => {
       case 'manual-run': f.run.event = 'workflow_dispatch'; break;
       case 'wrong-workflow': f.run.path = '.github/workflows/other.yml'; break;
       case 'wrong-run-repo': f.run.repository.full_name = 'other/repo'; break;
-      case 'wrong-run-sha': f.run.head_sha = BASE; break;
+      case 'wrong-run-sha': f.run.head_sha = HEAD; break;
       case 'wrong-run-pr': f.run.pull_requests[0].number = 43; break;
       case 'wrong-run-attempt': f.run.run_attempt = 0; break;
       case 'wrong-run-title': f.run.display_title = 'Squad review \u2014 PR #43'; break;
       case 'verdict-before-run': f.run.run_started_at = FINISHED; break;
       case 'wrong-bot-id': f.review.user.id = 1; break;
       case 'wrong-bot-type': f.review.user.type = 'User'; break;
+      case 'forged-check': f.checkRuns[0].external_id = 'forged'; break;
+      case 'wrong-check-app': f.checkRuns[0].app.id = 1; break;
+      case 'wrong-check-attestation': f.checkRuns[0].output.summary = JSON.stringify({
+        ...JSON.parse(f.checkRuns[0].output.summary),
+        event: 'pull_request',
+      }); break;
     }
     await expect(assertClearingReview(f.env, f.get, { relay: true })).rejects.toThrow();
   });
@@ -350,7 +411,7 @@ describe('independent Squad review guard', () => {
   it('does not accept a manual gate or the merge commit as the reviewed head', async () => {
     const f = fixture(true);
     await expect(assertClearingReview({ ...f.env, GITHUB_EVENT_NAME: 'workflow_dispatch' }, f.get, { relay: true }))
-      .rejects.toThrow('only PR runs');
+      .rejects.toThrow('only base-controlled PR target runs');
     await expect(reviewTarget({ ...f.env, SQUAD_REVIEW_HEAD: BASE }, f.get, { relay: true }))
       .rejects.toThrow('head changed');
   });
@@ -371,6 +432,10 @@ describe('independent Squad review guard', () => {
     f.state.comments = [f.comment];
     f.state.comments.push({ ...f.comment, body: `${OVERRIDE_PREFIX}${JSON.stringify({ ...f.override, head_sha: BASE })}` });
     f.run.run_attempt = 2;
+    f.checkRuns[0].output.summary = JSON.stringify({
+      ...JSON.parse(f.checkRuns[0].output.summary),
+      run_attempt: 2,
+    });
     await expect(assertClearingReview(f.env, f.get, { relay: true })).resolves.toEqual(f.verdict);
     expect(f.state.calls.some(route => route.endsWith('/attempts/2/jobs'))).toBe(true);
   });
@@ -461,7 +526,7 @@ describe('independent Squad review guard', () => {
     }] }));
     await expect(enforceReviewOutputs({
       ...f.env, GITHUB_EVENT_NAME: 'workflow_dispatch', GH_AW_AGENT_OUTPUT: path,
-    }, f.get)).rejects.toThrow('only PR runs');
+    }, f.get)).rejects.toThrow('only base-controlled PR target runs');
     expect(JSON.parse(readFileSync(path, 'utf8')).items[0].body).toBe('Diagnostic.');
   });
 

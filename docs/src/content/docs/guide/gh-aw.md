@@ -112,7 +112,8 @@ requires a human to review the verifier/compile evidence before merging.
 
 After merge, the default-branch bootstrap workflow opens the draft Cast PR.
 That PR is the activation canary: `Squad Review / review` must succeed using the
-guard and manifest checked out from the Cast PR's exact base commit. The guard
+base-controlled `pull_request_target` workflow plus the guard and manifest
+checked out from the Cast PR's exact base commit. The guard
 also requires matching exact-head provenance in the PR body and a durable
 GitHub Actions bot comment, so editable PR prose cannot rebind an old bootstrap
 run to a changed branch head. Only after that base-controlled canary succeeds
@@ -1448,10 +1449,12 @@ The implementation worker performs an internal self-review before opening a PR:
 After the PR is opened, `squad-review` provides an independent review.
 Every same-repository pull request triggers review on `opened`, `reopened`,
 `ready_for_review` and `synchronize`; fork pull requests are refused. The
-workflow has no `workflow_dispatch` trigger, so a contributor-selected ref
-cannot execute reviewer code or safe-output handlers. Comment `/squad review`
-to receive instructions for opening the existing `Squad Review / review` run
-for the current head and using GitHub's **Re-run jobs** action.
+workflow runs as `pull_request_target` from immutable default-branch context,
+sets `checkout: false`, and has no `workflow_dispatch` trigger. It never checks
+out or executes pull request files, actions, scripts, guards, or manifests; the
+agent reads the diff through GitHub APIs. Comment `/squad review` to receive
+instructions for opening the existing base-controlled run and using GitHub's
+**Re-run all jobs** action.
 
 The reviewer classifies provenance in this priority order:
 
@@ -1485,9 +1488,11 @@ labels, and GitHub logins do not establish independent logical agent identity.
 This is auditable logical attribution, not proof of a separate account or model.
 Registry migration and legitimate attribution changes require human review.
 
-The trusted guard reads attribution from the exact PR head commit, never the
-agent's working tree. A `Squad-Review-Verdict:` JSON record binds repository, PR,
-head SHA, both agent IDs, verdict, UTC timestamp, and workflow run/attempt.
+The trusted guard reads attribution from the exact PR head commit through the
+GitHub API, never by checking out or executing the PR. A
+`Squad-Review-Verdict:` JSON record binds repository, PR, base SHA, head SHA,
+immutable workflow SHA, both agent IDs, verdict, UTC timestamp, and the
+`pull_request_target` workflow run/attempt.
 Exactly one current-head record is required. The legacy
 `Squad-Review-Head: <SHA>` marker remains human-readable but is not authorization.
 Per-PR concurrency cancels stale runs; both output and final gate re-fetch the
@@ -1506,8 +1511,13 @@ exactly one pull request review. It returns:
 
 The trusted writer publishes these logical verdicts in a native `COMMENT`
 review: GitHub does not permit an account to approve or request changes on its
-own PR. The separate status check enforces `REQUEST_CHANGES`; no additional bot
-accounts or Apps are needed.
+own PR. The native `Squad Review Authority / attest` job proves that the base-controlled
+workflow executed. Its publisher creates `Squad Review / review` on the exact
+PR head with a `squad-review-check/v1` attestation linked to that run. A
+PR-controlled workflow may create advisory output with the same display name,
+but it cannot satisfy the relay without the successful native authority job and
+exact event/base/head/run/App binding. The status check enforces
+`REQUEST_CHANGES`; no additional bot accounts or Apps are needed.
 
 The reviewer has no file-editing, issue-creation,
 pull-request-creation, remediation, merge, or `APPROVE` authority. Its verdict
@@ -1521,35 +1531,39 @@ The lifecycle is:
 ```
 
 The epic relay repeats the guard before running the agent and before processing
-any outputs. It requires a clearing verdict and the successful required job
-from that PR review run, completed **before merge**, for the merged PR's
-**head SHA**, not the merge commit. Bypassing a missing Squad review at merge
+any outputs. It requires a clearing verdict, the successful native authority
+job from the base-controlled run, and the exact-head published check completed
+**before merge** for the merged PR's **head SHA**, not the merge commit.
+Bypassing a missing Squad review at merge
 cannot silently advance the epic. Missing evidence stops the run with an explicit
 error; it never dispatches the next wave.
 
 ### Required check rollout (repository administrator)
 
 The stable literal check name is **`Squad Review / review`**.
-`inlined-imports: true` makes the compiled job directly addressable.
 There is no manual reviewer run. `/squad review` only explains how to rerun the
-existing automatic PR run, and only that exact run ID and attempt can satisfy
+existing automatic `pull_request_target` run, and only that exact base-controlled
+run ID, attempt, native authority job, and exact-head attestation can satisfy
 its emitted verdict and check.
 
 Brady (or the consumer repository administrator) must install/merge the complete
 generated bundle through the explicit human installation boundary, then observe
-a successful PR-triggered check on the post-install draft Cast PR before
+a successful base-controlled `pull_request_target` check on the post-install
+draft Cast PR before
 changing rulesets. The installation PR itself is not evidence: its workflow and
 check name are controlled by that PR. Record the activation canary's actual
-check name and GitHub App ID from the check-runs API. Enable the required context
-with that observed App ID on `dev` **only after advisory soak** has met the
+check name, external ID, details URL, attestation summary, and GitHub App ID
+from the check-runs API. Enable the required context with that observed App ID
+on `dev` **only after advisory soak** has met the
 evidence gate in #1734; promote to `main` after the agreed soak. This change
 does not modify repository rulesets and does not claim live soak evidence. Keep
 native human approving-review requirements enabled independently, with stale
 approvals dismissed. The bot's `COMMENT` is not a human approval. Do not use an
 unobserved guessed App ID or require the manual job.
 Because rulesets apply to all PRs, existing human/Copilot PRs must add committed
-attribution before enabling the requirement. Fork review is not supported by
-this workflow; do not relax it with `pull_request_target`.
+attribution before enabling the requirement. Fork review remains unsupported;
+the workflow rejects foreign head repositories even though its base-controlled
+trigger is `pull_request_target`.
 
 ### Auditable human override
 
@@ -1562,7 +1576,8 @@ native review ID, and a meaningful reason):
 Squad-Review-Override: {"schema":"squad-review-override/v1","repository":"owner/repo","pull_request":456,"head_sha":"0123456789abcdef0123456789abcdef01234567","review_id":789,"reason":"False positive: explanation and evidence for accepting this risk."}
 ```
 
-Then rerun the original **PR-triggered workflow**, not the manual dispatcher.
+Then rerun the original base-controlled **`pull_request_target` workflow**, not
+the manual dispatcher.
 The gate checks the human account type and live administrator permission,
 record shape, exact SHA/review binding, creation time after the verdict and
 before merge, and absence of edits or duplicate override records. Do not edit

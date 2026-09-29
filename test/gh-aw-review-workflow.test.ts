@@ -92,8 +92,14 @@ function assertReviewerContract(workflow: string): void {
   expect(concurrency).toContain('cancel-in-progress: true');
   expect(trigger).not.toMatch(/^\s+forks:/m);
   expect(trigger).not.toContain('workflow_dispatch:');
+  expect(trigger).toMatch(/pull_request_target:/);
+  expect(trigger).not.toMatch(/^\s+pull_request:/m);
+  expect(yaml).toContain('checkout: false');
+  expect(yaml).toContain('strict: false');
   expect(yaml).toContain('github.event.pull_request.head.repo.full_name == github.repository');
-  expect(yaml).not.toContain('github.workflow_sha');
+  expect(yaml).toContain('SQUAD_REVIEW_WORKFLOW_SHA: ${{ github.workflow_sha }}');
+  expect(yaml).toContain('ref: ${{ github.event.pull_request.base.sha }}');
+  expect(yaml).not.toContain('ref: ${{ github.workflow_sha }}');
   expect(yaml).not.toContain('github.event.inputs');
   expect(workflow).toContain('Squad-Review-Head: {40-character lowercase head SHA}');
   expect(rows).toEqual([
@@ -107,6 +113,9 @@ function assertReviewerContract(workflow: string): void {
   expect(workflow).toContain('inlined-imports: true');
   expect(workflow).toContain('await guard.enforceReviewOutputs');
   expect(workflow).toContain('await guard.assertClearingReview');
+  expect(workflow).toContain('Squad Review Authority / attest');
+  expect(workflow).toContain('Publish exact-head required check');
+  expect(workflow).toContain("run.event !== 'pull_request_target'");
   expect(workflow).toContain('The workflow-installation PR is an explicit human trust boundary.');
   expect(workflow).toContain('Trusted review starts on the automatic post-merge Cast PR.');
   expect(workflow).toContain('Human approval remains mandatory.');
@@ -150,9 +159,11 @@ afterAll(() => {
 function assertCompiledGate(lock: string): void {
   const workflow = parse(lock);
   const { jobs } = workflow;
+  expect(workflow.on).toHaveProperty('pull_request_target');
+  expect(workflow.on).not.toHaveProperty('pull_request');
   expect(workflow['run-name']).toBe('Squad review — PR #${{ github.event.pull_request.number }}');
   const review = jobs.review;
-  expect(review.name).toBe('Squad Review / review');
+  expect(review.name).toBe('Squad Review Authority / attest');
   expect(review.if).toBe('always()');
   expect(review.needs).toEqual(expect.arrayContaining(['agent', 'safe_outputs']));
   const execution = review.steps.find((step: { name: string }) => step.name === 'Require successful PR review execution');
@@ -160,6 +171,7 @@ function assertCompiledGate(lock: string): void {
   expect(execution.run).toContain('test "$OUTPUT_RESULT" = success');
   expect(review.steps.at(-1).with.script).toContain('await guard.assertClearingReview');
   expect(review.steps.at(-1).env.SQUAD_REVIEW_HEAD).toBe('${{ github.event.pull_request.head.sha }}');
+  expect(review.steps.at(-1).env.SQUAD_REVIEW_WORKFLOW_SHA).toBe('${{ github.workflow_sha }}');
   const steps = jobs.safe_outputs.steps;
   const guard = steps.findIndex((step: { name: string }) => step.name === 'Bind review output to committed agent identities and current head');
   const process = steps.findIndex((step: { name: string }) => step.name === 'Process Safe Outputs');
@@ -189,6 +201,27 @@ function assertCompiledGate(lock: string): void {
   expect(finalGate.with.script).not.toContain('Squad-Review-Verdict:');
   for (const step of review.steps) expect(step['continue-on-error']).toBeUndefined();
   expect(review['continue-on-error']).toBeUndefined();
+  const publish = jobs.publish;
+  expect(publish.name).toBe('Publish Squad Review required check');
+  expect(publish.if).toBe('always()');
+  expect(publish.needs).toEqual(expect.arrayContaining(['agent', 'safe_outputs', 'review']));
+  expect(publish.permissions).toMatchObject({
+    actions: 'read',
+    checks: 'write',
+    contents: 'read',
+    'pull-requests': 'read',
+  });
+  const publishStep = publish.steps.find((step: { name: string }) =>
+    step.name === 'Publish exact-head required check');
+  expect(publishStep.with.script).toContain("const checkName = 'Squad Review / review'");
+  expect(publishStep.with.script).toContain("run.event !== 'pull_request_target'");
+  expect(publishStep.with.script).toContain('run.head_sha !== workflowSha');
+  expect(publishStep.with.script).toContain('authorityJobs.length !== 1');
+  expect(publishStep.with.script).toContain("external_id: externalId");
+  expect(publishStep.with.script).toContain("head_sha: headSha");
+  expect(publishStep.with.script).not.toContain('github.event.pull_request.head.ref');
+  expect(lock).not.toContain('Checkout PR branch');
+  expect(lock).not.toMatch(/uses:\s+\.\/\.github\/actions\//);
 }
 
 function compiledGuardScripts(lock: string): Array<{ name: string; script: string }> {
@@ -279,13 +312,13 @@ describe('gh-aw enforcing Squad reviewer', () => {
     expect(ROUTER_FRONTMATTER).toContain('actions: read');
     expect(ROUTER).toContain('| `/squad review` | Review Relay |');
     expect(REVIEWER).not.toContain('slash_command:');
-    expect(reviewTrigger).toMatch(/pull_request:\n\s+types: \[opened, reopened, ready_for_review, synchronize\]/);
+    expect(reviewTrigger).toMatch(/pull_request_target:\n\s+types: \[opened, reopened, ready_for_review, synchronize\]/);
     expect(reviewTrigger).not.toContain('workflow_dispatch:');
     expect(relay).toContain('.github/workflows/squad-review.lock.yml');
-    expect(relay).toContain('exact current head');
-    expect(relay).toContain('require exactly one job named `Squad Review / review`');
-    expect(relay).toContain('This command did not rerun it.');
-    expect(relay).toContain('no automatic review run exists for the exact head');
+    expect(relay).toContain('exact current PR head');
+    expect(relay).toMatch(/require\s+exactly one job named `Squad Review Authority \/ attest`/);
+    expect(relay).toMatch(/command did not rerun it\./);
+    expect(relay).toMatch(/no base-controlled automatic review run exists for\s+the exact head/);
     expect(relay).not.toContain('dispatch-workflow');
   });
 
@@ -443,6 +476,8 @@ describe('gh-aw enforcing Squad reviewer', () => {
     expect(safeOutputs).not.toHaveProperty('create_issue');
     expect(safeOutputs).not.toHaveProperty('create_pull_request');
     expect(lock).toContain('GH_AW_HEAD_SHA: ${{ github.event.pull_request.head.sha }}');
+    expect(lock).toContain('pull_request_target:');
+    expect(lock).not.toContain('Checkout PR branch');
   }, 30000);
 
   it('loads review authority only from the base and makes first install a manual boundary', async () => {
@@ -505,9 +540,30 @@ describe('gh-aw enforcing Squad reviewer', () => {
     }
   }, 30000);
 
+  it('rejects compiled PR-head checkout, local action, and PR-trigger authority mutations', () => {
+    const mutations = [
+      REVIEWER.replace(
+        'ref: ${{ github.event.pull_request.base.sha }}',
+        'ref: ${{ github.event.pull_request.head.sha }}',
+      ),
+      REVIEWER.replace(
+        "uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0",
+        'uses: ./.github/actions/pr-controlled',
+      ),
+      REVIEWER.replace('pull_request_target:', 'pull_request:'),
+    ];
+    for (const [index, mutation] of mutations.entries()) {
+      expect(mutation, `compiled adversarial mutation ${index} must change the source`)
+        .not.toBe(REVIEWER);
+      const { lock } = compileReviewer(mutation);
+      expect(() => assertCompiledGate(lock), `compiled adversarial mutation ${index}`)
+        .toThrow();
+    }
+  }, 60000);
+
   it('kills mutations of every important authority and provenance gate', () => {
     const mutations = [
-      REVIEWER.replace('tools:\n  bash:', 'tools:\n  edit:\n  bash:'),
+      REVIEWER.replace('tools:\n  github:', 'tools:\n  edit:\n  github:'),
       REVIEWER.replace(
         'safe-outputs:\n',
         'safe-outputs:\n  dispatch-workflow:\n    workflows: [squad-retro]\n    max: 1\n',
@@ -526,18 +582,20 @@ describe('gh-aw enforcing Squad reviewer', () => {
       REVIEWER.replace('Every same-repository PR (including', 'Some PRs (including'),
       REVIEWER.replace('inlined-imports: true', 'inlined-imports: false'),
       REVIEWER.replace(
-        'on:\n  pull_request:',
-        'on:\n  workflow_dispatch:\n  pull_request:',
+        'on:\n  pull_request_target:',
+        'on:\n  workflow_dispatch:\n  pull_request_target:',
       ),
       REVIEWER.replace(
         'ref: ${{ github.event.pull_request.base.sha }}',
         'ref: ${{ github.workflow_sha }}',
       ),
+      REVIEWER.replace('checkout: false', 'checkout: true'),
+      REVIEWER.replace('pull_request_target:', 'pull_request:'),
       REVIEWER.replaceAll('Squad-Review-Head: {40-character lowercase head SHA}', 'Reviewed head SHA'),
     ];
 
-    for (const mutation of mutations) {
-      expect(() => assertReviewerContract(mutation)).toThrow();
+    for (const [index, mutation] of mutations.entries()) {
+      expect(() => assertReviewerContract(mutation), `source mutation ${index}`).toThrow();
     }
   });
 
@@ -546,11 +604,19 @@ describe('gh-aw enforcing Squad reviewer', () => {
     const mutations = [
       REVIEWER.replace('await guard.enforceReviewOutputs', 'void guard.enforceReviewOutputs'),
       REVIEWER.replace('await guard.assertClearingReview', 'void guard.assertClearingReview'),
-      REVIEWER.replace('    name: Squad Review / review', '    name: Other check'),
+      REVIEWER.replace('    name: Squad Review Authority / attest', '    name: Other check'),
       REVIEWER.replace('pathToFileURL(baseGuard)', "pathToFileURL('.squad-review-workflow/guard.mjs')"),
       REVIEWER.replace('No trusted Squad verdict was emitted.', 'Squad-Review-Verdict: trusted'),
       REVIEWER.replace('    if: always()\n', '    if: success()\n'),
       REVIEWER.replace('    needs: [agent, safe_outputs]', '    needs: [agent]'),
+      REVIEWER.replace(
+        "run.event !== 'pull_request_target'",
+        "run.event !== 'pull_request'",
+      ),
+      REVIEWER.replace(
+        "uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0",
+        "uses: ./.github/actions/pr-controlled",
+      ),
     ];
     for (const mutation of mutations) {
       expect(mutation).not.toBe(REVIEWER);
