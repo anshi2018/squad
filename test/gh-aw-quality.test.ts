@@ -3534,6 +3534,72 @@ describe('gh-aw: CI compiler pin contract', () => {
     },
   ] as const;
 
+  // This is a deliberately bounded recognizer, not a general shell parser.
+  // Unsupported here-documents fail closed; only literal cat-to-stdout is inert.
+  function shellCommands(run: string): string[] {
+    const commands: string[] = [];
+    let command = '';
+    let quote = '';
+    let wordStart = true;
+    for (let i = 0; i < run.length; i++) {
+      const char = run[i];
+      if (char === '\\' && quote !== "'") {
+        const next = run[++i];
+        if (next === undefined) throw new Error('Dangling shell escape');
+        if (next !== '\n' || quote) {
+          command += char + next;
+          wordStart = false;
+        }
+      } else if (char === quote) {
+        quote = '';
+        command += char;
+      } else if (!quote && (char === "'" || char === '"')) {
+        quote = char;
+        command += char;
+        wordStart = false;
+      } else if (!quote && char === '#' && wordStart) {
+        while (i + 1 < run.length && run[i + 1] !== '\n') i++;
+      } else if (!quote && char === '\n') {
+        const heredoc = command.match(/^cat <<(['"])([A-Za-z_][A-Za-z0-9_]*)\1$/);
+        if (heredoc) {
+          const end = run.indexOf(`\n${heredoc[2]}\n`, i);
+          if (end === -1) throw new Error('Unterminated literal heredoc');
+          command += run.slice(i, end + heredoc[2].length + 1);
+          i = end + heredoc[2].length + 1;
+        }
+        if (command.trim()) commands.push(command.trim());
+        command = '';
+        wordStart = true;
+      } else {
+        command += char;
+        if (!quote) wordStart = /[\s;|&()<>]/.test(char);
+      }
+    }
+    if (quote) throw new Error('Unterminated shell quote');
+    if (command.trim()) commands.push(command.trim());
+    return commands;
+  }
+
+  function isInstallerOrAmbiguous(command: string): boolean {
+    if (/^cat <<(['"])([A-Za-z_][A-Za-z0-9_]*)\1\n[\s\S]*\n\2$/.test(command)) return false;
+    if (/^(?:echo|printf)(?:\s+(?:'[^']*'|"(?:\\[\s\S]|[^"\\$`])*"))+$/.test(command)) return false;
+    // Remove word-splicing quotes/escapes for detection only, never for approval.
+    // A repository operand alone is enough: dynamic command/argument construction
+    // must not evade detection merely by hiding "gh extension install".
+    const visible = command.replace(/['"\\]/g, '');
+    const syntax = command.replace(/'[^']*'|"(?:\\[\s\S]|[^"\\])*"|\\[\s\S]/g,
+      token => token.startsWith('"') && /[$`]/.test(token) ? '$' : 'literal');
+    const dynamicCommand = '(?![A-Za-z_]\\w*=)[^\\s;&|()]*[$`]';
+    return /github\/gh-aw|\bgh\s+(?:extension|ext)\b/.test(visible) ||
+      /\bgh\s+[^\s]*[$`]/.test(visible) ||
+      new RegExp(`(?:^|[;&|(){}\\n])\\s*(?:(?:if|then|else|do|!|command|exec|env|sudo|--?[\\w-]+|[A-Za-z_]\\w*=[^()\\s]+)\\s+)*${dynamicCommand}`).test(syntax) ||
+      new RegExp(`(?:\\$\\(|\`)\\s*${dynamicCommand}`).test(visible) ||
+      /\b(?:command|exec|env|sudo)\s[^;\n]*[$`]/.test(syntax) ||
+      /(?:^|[;&|()\n])\s*(?:eval|source|\.)\s/.test(syntax) ||
+      /\b(?:bash|sh|zsh|ksh)\s+.*(?:-[a-z]*c\b|[$`])/.test(visible) ||
+      /<</.test(syntax) || /\\\n/.test(command);
+  }
+
   function assertCompilerPins(source: string): void {
     const workflow = parseDocument(source);
     expect(workflow.errors).toEqual([]);
@@ -3550,17 +3616,12 @@ describe('gh-aw: CI compiler pin contract', () => {
         const run = step.get('run');
         if (run === undefined) continue;
         if (typeof run !== 'string') throw new Error('CI run must be a string');
-        const commands = run.split('\n').map(line => line.replace(
-          /'[^']*'|"(?:\\.|[^"\\])*"|\\.|(^|\s)#.*$/g,
-          (token, comment) => comment === undefined ? token : '',
-        ).trim()).filter(Boolean);
+        const commands = shellCommands(`${run}\n`);
         const name = step.get('name');
         // Include named slots even if their install was removed or replaced by output.
         // Unexpected install-like scripts fail closed; never accept a shell wrapper
         // merely because it contains the pinned command as a substring.
-        if (installs.some(install => install.name === name) || commands.some(line =>
-          !/^(?:echo|printf)(?:\s+(?:'[^']*'|"[^"$`]*"))+$/.test(line) &&
-          /\bgh\s+(?:extension|ext)\s+install\b.*\bgithub\/gh-aw\b/.test(line))) {
+        if (installs.some(install => install.name === name) || commands.some(isInstallerOrAmbiguous)) {
           installSteps.push({ job: String(key), name, commands });
         }
       }
@@ -3598,6 +3659,26 @@ describe('gh-aw: CI compiler pin contract', () => {
     assertCompilerPins(workflow.toString());
   });
 
+  it.each([
+    ['continued comment', '# gh extension \\\necho "install github/gh-aw"'],
+    ['single-quoted backslash', "printf '%s' 'gh extension \\\ninstall github/gh-aw'"],
+    ['double-quoted backslash', 'echo "gh extension \\\ninstall github/gh-aw"'],
+    ['escaped backslash', String.raw`echo "gh extension \\"`],
+    ['literal heredoc', "cat <<'INSTALL'\ngh extension \\\ninstall github/gh-aw\nINSTALL"],
+    ['heredoc quote and comment text', "cat <<'INSTALL'\n' \" # \\\n$(gh extension install github/gh-aw)\nINSTALL"],
+  ])('ignores inert %s without folding literal text', (_label, run) => {
+    const workflow = parseDocument(ci);
+    workflow.addIn(['jobs', 'changes', 'steps'], { name: 'Literal example', run });
+    assertCompilerPins(workflow.toString());
+    if (!run.startsWith('#')) expect(shellCommands(`${run}\n`)).toEqual([run]);
+  });
+
+  it('accepts an unquoted continuation of the standalone approved command', () => {
+    assertCompilerPins(mutateInstall('test', step => {
+      step.set('run', installs[0].commands[0].replace('extension ', 'extension \\\n'));
+    }));
+  });
+
   describe.each(installs)('$job install step', ({ job, commands }) => {
     it.each([
       ['unpinned', 'gh extension install github/gh-aw'],
@@ -3611,6 +3692,10 @@ describe('gh-aw: CI compiler pin contract', () => {
       ['preceding command', `echo preparing\n${commands[0]}`],
       ['appended command', `${commands[0]}; gh extension install github/gh-aw`],
       ['heredoc text', `cat <<'INSTALL'\n${commands[0]}\nINSTALL`],
+      ['quoted continuation', `'${commands[0].replace('extension ', 'extension \\\n')}'`],
+      ['escaped backslash is not continuation', commands[0].replace('extension ', 'extension \\\\\n')],
+      ['comment backslash is not continuation', commands[0].replace('extension ', 'extension # comment \\\n')],
+      ['space after backslash is not continuation', commands[0].replace('extension ', 'extension \\ \n')],
     ])('rejects %s', (_label, command) => {
       const source = mutateInstall(job, step => {
         step.set('run', [command, ...commands.slice(1)].join('\n'));
@@ -3643,6 +3728,37 @@ describe('gh-aw: CI compiler pin contract', () => {
       ['extra wrapped install', 'changes', `bash -c '${commands[0]}'`],
       ['extra install after quoted hash', 'changes', `echo "#"; ${commands[0]}`],
       ['extra install in output substitution', 'changes', `echo "$(${commands[0]})"`],
+      ['continued installer', 'changes', 'gh extension \\\ninstall github/gh-aw'],
+      ['continued command word', 'changes', 'g\\\nh ext\\\nension install github/gh-aw'],
+      ['continued repository', 'changes', 'gh extension install github/gh-\\\naw'],
+      ['continued wrapper', 'changes', 'command gh extension \\\ninstall github/gh-aw'],
+      ['continued conditional', 'changes', 'if true; then gh extension \\\ninstall github/gh-aw; fi'],
+      ['continued substitution', 'changes', 'echo "$(gh extension \\\ninstall github/gh-aw)"'],
+      ['backtick substitution', 'changes', 'echo "`gh extension install github/gh-aw`"'],
+      ['quoted word splicing', 'changes', `g'h' exten"sion" install github/gh-"aw"`],
+      ['dynamic command', 'changes', 'cli=gh\n"$cli" extension install github/gh-aw'],
+      ['dynamic arguments', 'changes', 'gh "$verb" "$action" "$repository"'],
+      ['partly dynamic subcommand', 'changes', 'gh exten"$suffix" "$action" "$repository"'],
+      ['partly dynamic executable', 'changes', 'g"$suffix" "$verb" "$action" "$repository"'],
+      ['fully dynamic command', 'changes', '"$INSTALLER"'],
+      ['dynamic command in group', 'changes', '{ "$INSTALLER"; }'],
+      ['dynamic command in substitution', 'changes', 'echo "$("$INSTALLER")"'],
+      ['dynamic command in backticks', 'changes', 'echo "`$INSTALLER`"'],
+      ['dynamic command after assignment', 'changes', 'ENV=value "$INSTALLER"'],
+      ['dynamic env wrapper', 'changes', 'env -i "$INSTALLER"'],
+      ['dynamic wrapper with option operand', 'changes', 'env -u PATH "$INSTALLER"'],
+      ['dynamic shell wrapper', 'changes', 'bash -c "$INSTALLER"'],
+      ['eval wrapper', 'changes', 'eval "$INSTALLER"'],
+      ['unquoted heredoc substitution', 'changes', 'cat <<INSTALL\n$(gh extension \\\ninstall github/gh-aw)\nINSTALL'],
+      ['executable heredoc', 'changes', "bash <<'INSTALL'\ngh extension \\\ninstall github/gh-aw\nINSTALL"],
+      ['literal piped to shell', 'changes', `printf '%s' '${commands[0]}' | bash`],
+      ['literal heredoc piped to shell', 'changes', "cat <<'INSTALL' | bash\ngh extension \\\ninstall github/gh-aw\nINSTALL"],
+      ['installer after literal heredoc', 'changes', "cat <<'INSTALL'\nliteral \\\nINSTALL\ngh extension \\\ninstall github/gh-aw"],
+      ['installer after comment backslash', 'changes', '# example \\\ngh extension install github/gh-aw'],
+      ['installer after quoted backslash', 'changes', "echo '\\'\ngh extension install github/gh-aw"],
+      ['installer after escaped backslash', 'changes', 'echo \\\\\ngh extension install github/gh-aw'],
+      ['installer after escaped space hash', 'changes', 'echo \\ #; gh extension install github/gh-aw'],
+      ['double-quoted continuations', 'changes', '"g\\\nh" "exten\\\nsion" install "github/gh-\\\naw"'],
     ])('rejects %s', (_label, targetJob, command) => {
       const workflow = parseDocument(ci);
       workflow.addIn(['jobs', targetJob, 'steps'], {
