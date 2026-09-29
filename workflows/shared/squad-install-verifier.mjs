@@ -651,8 +651,11 @@ function verifyInstalledBytes(root, contract, revision) {
   for (const entry of contract.workflows) readRequired(root, entry.lock);
   for (const entry of contract.workflows) {
     const normalized = normalizeCompiledLock(readRequired(root, entry.lock), revision);
-    if (sha256(normalized) !== entry.lock_sha256) {
-      throw new Error(`Installed digest mismatch for ${entry.lock}.`);
+    const observedDigest = sha256(normalized);
+    if (observedDigest !== entry.lock_sha256) {
+      throw new Error(
+        `Installed digest mismatch for ${entry.lock}: expected ${entry.lock_sha256}, observed ${observedDigest}.`,
+      );
     }
   }
 }
