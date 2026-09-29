@@ -1,12 +1,16 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   assertClearingReview, CHECK_NAME, enforceReviewOutputs, OVERRIDE_PREFIX,
   reviewTarget, validateAttribution, validateVerdict, VERDICT_PREFIX,
 } from '../workflows/shared/squad-review-guard.mjs';
+import {
+  createFirstInstallFixture,
+  githubFile,
+  type InstallFixture,
+} from './helpers/gh-aw-install-fixture.js';
 
 const REPOSITORY = 'squad/example';
 const HEAD = 'a'.repeat(40);
@@ -17,13 +21,11 @@ const SUBMITTED = '2026-09-28T12:01:01Z';
 const FINISHED = '2026-09-28T12:02:00Z';
 const MERGED = '2026-09-28T12:03:00Z';
 const NOW = Date.parse('2026-09-28T12:04:00Z');
-const GUARD_SHA256 = createHash('sha256')
-  .update(readFileSync(join(process.cwd(), 'workflows/shared/squad-review-guard.mjs')))
-  .digest('hex');
-const INSTALL_WORKFLOWS = [
-  'squad', 'squad-implement-worker', 'squad-review', 'squad-deps-worker',
-  'squad-retro', 'squad-improvement-worker', 'squad-bootstrap', 'squad-command-router',
-];
+const FIRST_INSTALL = createFirstInstallFixture(HEAD);
+const GUARD_PATH = '.github/workflows/shared/squad-review-guard.mjs';
+const GUARD_SHA256 = FIRST_INSTALL.provenance.files.find(
+  entry => entry.destination === GUARD_PATH,
+)!.sha256;
 const workspaces: string[] = [];
 
 afterEach(() => {
@@ -86,10 +88,13 @@ function fixture(relay = false) {
     reviews: [review], comments: [] as typeof comment[], permission: 'admin',
     missingManifest: false, calls: [] as string[], prReads: 0, changeAfterFirstRead: false,
   };
-  const encode = (value: unknown) => ({
-    type: 'file', encoding: 'base64', size: 1000,
-    content: Buffer.from(JSON.stringify(value)).toString('base64'),
-  });
+  const encode = (value: unknown) => {
+    const content = Buffer.from(JSON.stringify(value));
+    return {
+      type: 'file', encoding: 'base64', size: content.length,
+      content: content.toString('base64'),
+    };
+  };
   const get = async (route: string, fields?: Record<string, unknown>) => {
     state.calls.push(route);
     if (route.endsWith('/pulls/42')) {
@@ -125,72 +130,55 @@ function fixture(relay = false) {
   };
 }
 
-function firstInstallProof(guardSha256 = GUARD_SHA256) {
-  const manifest = {
-    schema_version: 1,
-    package: 'bradygaster/squad/workflows',
-    revision_policy: { kind: 'immutable-git-commit' },
-    workflows: INSTALL_WORKFLOWS.map(name => ({
-      name,
-      destination: `.github/workflows/${name}.md`,
-      lock: `.github/workflows/${name}.lock.yml`,
-      source_sha256: 'c'.repeat(64),
-    })),
-    shared_runtime: [{
-      path: 'shared/squad-review-guard.mjs',
-      destination: '.github/workflows/shared/squad-review-guard.mjs',
-      ownership: 'manifest',
-      sha256: guardSha256,
-    }],
+function firstInstallProof(): InstallFixture {
+  return {
+    manifest: structuredClone(FIRST_INSTALL.manifest),
+    provenance: structuredClone(FIRST_INSTALL.provenance),
+    consumerFiles: new Map([...FIRST_INSTALL.consumerFiles].map(
+      ([path, content]) => [path, Buffer.from(content)],
+    )),
+    canonicalFiles: new Map([...FIRST_INSTALL.canonicalFiles].map(
+      ([path, content]) => [path, Buffer.from(content)],
+    )),
   };
-  const required = [
-    '.github/aw/squad-workflows.manifest.json',
-    '.github/workflows/shared/squad-review-guard.mjs',
-    ...INSTALL_WORKFLOWS.flatMap(name => [
-      `.github/workflows/${name}.md`,
-      `.github/workflows/${name}.lock.yml`,
-    ]),
-  ];
-  const provenance = {
-    schemaVersion: 1,
-    package: 'bradygaster/squad/workflows',
-    source: `bradygaster/squad/workflows@${HEAD}`,
-    resolvedCommit: HEAD,
-    files: required.map(destination => ({ destination, sha256: 'd'.repeat(64) })),
-  };
-  provenance.files.find(entry =>
-    entry.destination === '.github/workflows/shared/squad-review-guard.mjs')!.sha256 = guardSha256;
-  provenance.files.find(entry =>
-    entry.destination === '.github/aw/squad-workflows.manifest.json')!.sha256 =
-      createHash('sha256').update(JSON.stringify(manifest)).digest('hex');
-  return { manifest, provenance };
+}
+
+async function firstInstallGet(
+  fixture: ReturnType<typeof fixture>,
+  proof: InstallFixture,
+  route: string,
+  fields?: Record<string, unknown>,
+) {
+  if (route.endsWith('/contents/.squad-review.json')) {
+    throw Object.assign(new Error('Not Found'), { status: 404 });
+  }
+  if (route.endsWith('/contents/.github/aw/packages')) {
+    expect(fields?.ref).toBe(HEAD);
+    return [{
+      type: 'file',
+      name: 'bradygaster-squad-workflows-3632054824e8.json',
+    }];
+  }
+  if (route.endsWith(
+    '/contents/.github/aw/packages/bradygaster-squad-workflows-3632054824e8.json',
+  )) return fixture.encode(proof.provenance);
+  const marker = '/contents/';
+  const path = route.slice(route.indexOf(marker) + marker.length);
+  const files = route.startsWith('repos/bradygaster/squad/')
+    ? proof.canonicalFiles
+    : proof.consumerFiles;
+  const content = files.get(path);
+  if (content) return githubFile(content);
+  return fixture.get(route, fields);
 }
 
 describe('independent Squad review guard', () => {
   it('uses reserved workflow-role attribution only for a proven clean package install', async () => {
     const f = fixture();
     f.state.reviews = [];
-    const { manifest, provenance } = firstInstallProof();
-    const get = async (route: string, fields?: Record<string, unknown>) => {
-      if (route.endsWith('/contents/.squad-review.json')) {
-        throw Object.assign(new Error('Not Found'), { status: 404 });
-      }
-      if (route.endsWith('/contents/.github/aw/squad-workflows.manifest.json')) {
-        expect(fields?.ref).toBe(HEAD);
-        return f.encode(manifest);
-      }
-      if (route.endsWith('/contents/.github/aw/packages')) {
-        expect(fields?.ref).toBe(HEAD);
-        return [{
-          type: 'file',
-          name: 'bradygaster-squad-workflows-3632054824e8.json',
-        }];
-      }
-      if (route.endsWith(
-        '/contents/.github/aw/packages/bradygaster-squad-workflows-3632054824e8.json',
-      )) return f.encode(provenance);
-      return f.get(route, fields);
-    };
+    const proof = firstInstallProof();
+    const get = (route: string, fields?: Record<string, unknown>) =>
+      firstInstallGet(f, proof, route, fields);
     const options = {
       firstInstall: true,
       workflowSha: HEAD,
@@ -218,20 +206,9 @@ describe('independent Squad review guard', () => {
 
   it('refuses arbitrary clean-base PRs and malformed first-install proof', async () => {
     const f = fixture();
-    const { manifest, provenance } = firstInstallProof();
-    const missingAttribution = async (route: string, fields?: Record<string, unknown>) => {
-      if (route.endsWith('/contents/.squad-review.json')) {
-        throw Object.assign(new Error('Not Found'), { status: 404 });
-      }
-      if (route.endsWith('/contents/.github/aw/squad-workflows.manifest.json')) {
-        return f.encode(manifest);
-      }
-      if (route.endsWith('/contents/.github/aw/packages')) {
-        return [{ type: 'file', name: 'bradygaster-squad-workflows-3632054824e8.json' }];
-      }
-      if (route.includes('/contents/.github/aw/packages/')) return f.encode(provenance);
-      return f.get(route, fields);
-    };
+    const proof = firstInstallProof();
+    const missingAttribution = (route: string, fields?: Record<string, unknown>) =>
+      firstInstallGet(f, proof, route, fields);
     const options = {
       firstInstall: true,
       workflowSha: HEAD,
@@ -243,17 +220,23 @@ describe('independent Squad review guard', () => {
       ...options, workflowSha: BASE,
     })).rejects.toThrow('outside an immutable clean first install');
 
-    manifest.workflows.pop();
+    proof.manifest.workflows.pop();
+    proof.canonicalFiles.set(
+      'workflows/squad-workflows.manifest.json',
+      Buffer.from(`${JSON.stringify(proof.manifest, null, 2)}\n`),
+    );
     await expect(reviewTarget(f.env, missingAttribution, options))
-      .rejects.toThrow('invalid committed first-install manifest');
-    manifest.workflows = firstInstallProof().manifest.workflows;
-    provenance.source = `bradygaster/squad/workflows@${BASE}`;
+      .rejects.toThrow('invalid immutable package manifest');
+    const reset = firstInstallProof();
+    proof.manifest = reset.manifest;
+    proof.canonicalFiles = reset.canonicalFiles;
+    proof.provenance.source = `bradygaster/squad/workflows@${BASE}`;
     await expect(reviewTarget(f.env, missingAttribution, options))
       .rejects.toThrow('invalid committed first-install package provenance');
-    provenance.source = `bradygaster/squad/workflows@${HEAD}`;
-    provenance.files.pop();
+    proof.provenance.source = `bradygaster/squad/workflows@${HEAD}`;
+    proof.provenance.files.pop();
     await expect(reviewTarget(f.env, missingAttribution, options))
-      .rejects.toThrow('incomplete committed first-install topology');
+      .rejects.toThrow('invalid committed first-install package provenance');
   });
 
   it('does not rescue malformed attribution or non-404 reads during first install', async () => {
@@ -272,6 +255,60 @@ describe('independent Squad review guard', () => {
       }
       return f.get(route, fields);
     }, options)).rejects.toThrow('Forbidden');
+  });
+
+  it('hashes installed and immutable package bytes instead of trusting provenance claims', async () => {
+    const f = fixture();
+    const options = {
+      firstInstall: true,
+      workflowSha: HEAD,
+      workflowGuardSha256: GUARD_SHA256,
+      workflowSource: `bradygaster/squad/workflows/package/squad-review.md@${HEAD}`,
+    };
+    const sourcePath = '.github/workflows/squad.md';
+    const lockPath = '.github/workflows/squad.lock.yml';
+    const canonicalPath = 'workflows/package/squad.md';
+
+    const changedSource = firstInstallProof();
+    changedSource.consumerFiles.set(
+      sourcePath,
+      Buffer.concat([changedSource.consumerFiles.get(sourcePath)!, Buffer.from('\nattacker edit\n')]),
+    );
+    await expect(reviewTarget(
+      f.env,
+      (route, fields) => firstInstallGet(f, changedSource, route, fields),
+      options,
+    )).rejects.toThrow(`installed bytes do not match ownership for ${sourcePath}`);
+
+    const changedLock = firstInstallProof();
+    changedLock.consumerFiles.set(
+      lockPath,
+      Buffer.concat([changedLock.consumerFiles.get(lockPath)!, Buffer.from('\nattacker edit\n')]),
+    );
+    await expect(reviewTarget(
+      f.env,
+      (route, fields) => firstInstallGet(f, changedLock, route, fields),
+      options,
+    )).rejects.toThrow(`installed compiled lock mismatch for ${lockPath}`);
+
+    const changedCanonical = firstInstallProof();
+    changedCanonical.canonicalFiles.set(
+      canonicalPath,
+      Buffer.concat([changedCanonical.canonicalFiles.get(canonicalPath)!, Buffer.from('\nwrong\n')]),
+    );
+    await expect(reviewTarget(
+      f.env,
+      (route, fields) => firstInstallGet(f, changedCanonical, route, fields),
+      options,
+    )).rejects.toThrow(`immutable package source digest mismatch for ${canonicalPath}`);
+
+    const sourceFailure = firstInstallProof();
+    await expect(reviewTarget(f.env, async (route, fields) => {
+      if (route === `repos/bradygaster/squad/contents/${canonicalPath}`) {
+        throw Object.assign(new Error('source fetch forbidden'), { status: 403 });
+      }
+      return firstInstallGet(f, sourceFailure, route, fields);
+    }, options)).rejects.toThrow('source fetch forbidden');
   });
 
   it('accepts a distinct, committed, current-head verdict and merged-head relay', async () => {

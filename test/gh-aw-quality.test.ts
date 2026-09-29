@@ -16,6 +16,7 @@ import { execFileSync, execSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { minimatch } from 'minimatch';
 import { POSIX_SHELL, NO_POSIX_SHELL_MESSAGE, requirePosixShell } from './posix-shell';
+import { createFirstInstallFixture } from './helpers/gh-aw-install-fixture.js';
 import {
   extractRunBlocks,
   scanRunBlocks,
@@ -3524,13 +3525,16 @@ describe('gh-aw: canonical package integrity contract', () => {
 
   function makeConsumer(revision = revisionA, materialize = true): string {
     const root = createTestWorkspace('gh-aw-package-contract-');
+    const install = createFirstInstallFixture(revision);
     copyInto(root, CONTRACT_SOURCE, CONTRACT_DESTINATION);
     const contract = JSON.parse(readFileSync(join(process.cwd(), CONTRACT_SOURCE), 'utf8'));
     for (const workflow of contract.workflows) {
-      copyInto(root, workflow.source, workflow.destination);
+      const destination = join(root, workflow.destination);
+      mkdirSync(dirname(destination), { recursive: true });
+      writeFileSync(destination, install.consumerFiles.get(workflow.destination)!);
       const lock = join(root, workflow.lock);
       mkdirSync(dirname(lock), { recursive: true });
-      writeFileSync(lock, `# test lock for ${workflow.name}\n`);
+      writeFileSync(lock, install.consumerFiles.get(workflow.lock)!);
     }
     for (const resource of contract.shared_runtime) {
       copyInto(root, resource.source, resource.package_destination);

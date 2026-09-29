@@ -77,6 +77,8 @@ safe-outputs:
             `${process.env.GITHUB_WORKSPACE}/.squad-review-base/.github/aw/squad-workflows.manifest.json`;
           const workflowGuard =
             `${process.env.GITHUB_WORKSPACE}/.squad-review-workflow/.github/workflows/shared/squad-review-guard.mjs`;
+          const workflowReview =
+            `${process.env.GITHUB_WORKSPACE}/.squad-review-workflow/.github/workflows/squad-review.md`;
           let guardPath;
           let firstInstall = false;
           if (existsSync(baseGuard)) {
@@ -92,6 +94,11 @@ safe-outputs:
           const workflowGuardSha256 = firstInstall
             ? createHash('sha256').update(readFileSync(workflowGuard)).digest('hex')
             : undefined;
+          const workflowSource = firstInstall
+            ? readFileSync(workflowReview, 'utf8').match(
+              /^source:\s+(bradygaster\/squad\/workflows\/package\/squad-review\.md@[0-9a-f]{40})$/m
+            )?.[1]
+            : undefined;
           const guard = await import(pathToFileURL(guardPath).href);
           await guard.enforceReviewOutputs(process.env,
             async (route, fields) => (await github.request(`GET /${route}`, fields)).data,
@@ -99,7 +106,7 @@ safe-outputs:
               firstInstall,
               workflowSha: '${{ github.workflow_sha }}',
               workflowGuardSha256,
-              workflowSource: process.env.GH_AW_WORKFLOW_SOURCE,
+              workflowSource,
             });
   add-comment:
     max: 1
@@ -166,6 +173,8 @@ jobs:
               `${process.env.GITHUB_WORKSPACE}/.squad-review-base/.github/aw/squad-workflows.manifest.json`;
             const workflowGuard =
               `${process.env.GITHUB_WORKSPACE}/.squad-review-workflow/.github/workflows/shared/squad-review-guard.mjs`;
+            const workflowReview =
+              `${process.env.GITHUB_WORKSPACE}/.squad-review-workflow/.github/workflows/squad-review.md`;
             let guardPath;
             let firstInstall = false;
             if (existsSync(baseGuard)) {
@@ -181,10 +190,20 @@ jobs:
             const workflowGuardSha256 = firstInstall
               ? createHash('sha256').update(readFileSync(workflowGuard)).digest('hex')
               : undefined;
+            const workflowSource = firstInstall
+              ? readFileSync(workflowReview, 'utf8').match(
+                /^source:\s+(bradygaster\/squad\/workflows\/package\/squad-review\.md@[0-9a-f]{40})$/m
+              )?.[1]
+              : undefined;
             const guard = await import(pathToFileURL(guardPath).href);
             await guard.assertClearingReview(process.env,
               async (route, fields) => (await github.request(`GET /${route}`, fields)).data,
-              { firstInstall, workflowSha: '${{ github.workflow_sha }}', workflowGuardSha256 });
+              {
+                firstInstall,
+                workflowSha: '${{ github.workflow_sha }}',
+                workflowGuardSha256,
+                workflowSource,
+              });
 ---
 
 # Squad Review
@@ -229,8 +248,11 @@ requirement. The deterministic guard recognizes it only when the PR base has
 neither the installed review guard nor `.github/aw/squad-workflows.manifest.json`,
 the guard is loaded from the immutable workflow commit, and the exact PR head
 contains a valid `bradygaster/squad/workflows` installation manifest and package
-provenance record. The source revision, complete eight-workflow topology,
-manifest digest, and executing guard digest must agree. In that case only,
+provenance record. Every installed workflow source, compiled lock, runtime
+resource, skill, and manifest byte is fetched at the exact PR head and checked
+against canonical content or normalized lock digests fetched from the immutable
+package revision. The source revision, exact 8/17/1 topology, ownership shape,
+and executing guard digest must agree. In that case only,
 absent `.squad-review.json` binds the reserved synthetic attribution
 `author_agent: @squad/bootstrap-installation` and
 `reviewer_agent: @squad/bootstrap-review-workflow`. These values are outside

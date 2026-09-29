@@ -5,6 +5,7 @@ import { createHash } from 'node:crypto';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { extractSafeOutputsConfigJson } from './helpers/gh-aw-lock.js';
+import { createFirstInstallFixture } from './helpers/gh-aw-install-fixture.js';
 import { parse } from 'yaml';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -18,6 +19,8 @@ const SHARED_BOOTSTRAP = read('workflows/shared/squad.md');
 const REVIEWER_FRONTMATTER = frontmatter(REVIEWER);
 const ROUTER_FRONTMATTER = frontmatter(ROUTER);
 const compileWorkspaces: string[] = [];
+const LIVE_INSTALL_REVISION = 'c'.repeat(40);
+const LIVE_INSTALL = createFirstInstallFixture(LIVE_INSTALL_REVISION);
 
 function read(relativePath: string): string {
   return readFileSync(resolve(ROOT, relativePath), 'utf8').replace(/\r\n/g, '\n');
@@ -175,9 +178,8 @@ function assertCompiledGate(lock: string): void {
   expect(steps[guard].with.script).toContain('firstInstall = true');
   expect(steps[guard].with.script).toContain("createHash('sha256')");
   expect(steps[guard].with.script).toContain('workflowGuardSha256');
-  expect(steps[guard].with.script).toContain(
-    'workflowSource: process.env.GH_AW_WORKFLOW_SOURCE',
-  );
+  expect(steps[guard].with.script).toContain('workflowSource');
+  expect(steps[guard].with.script).toContain('workflowReview');
   expect(steps[guard].with.script).toContain('missing from an established base installation');
   const finalGate = review.steps.find((step: { name: string }) =>
     step.name === 'Enforce independent current-head verdict');
@@ -186,6 +188,7 @@ function assertCompiledGate(lock: string): void {
   expect(finalGate.with.script).toContain('firstInstall = true');
   expect(finalGate.with.script).toContain("createHash('sha256')");
   expect(finalGate.with.script).toContain('workflowGuardSha256');
+  expect(finalGate.with.script).toContain('workflowSource');
   expect(finalGate.with.script).toContain('missing from an established base installation');
   for (const step of review.steps) expect(step['continue-on-error']).toBeUndefined();
   expect(review['continue-on-error']).toBeUndefined();
@@ -235,6 +238,10 @@ async function executeCompiledGuardLoader(
   const workflowPath = resolve(workspace, '.squad-review-workflow', guardPath);
   mkdirSync(dirname(workflowPath), { recursive: true });
   writeFileSync(workflowPath, workflowGuard);
+  writeFileSync(
+    resolve(workspace, '.squad-review-workflow', '.github/workflows/squad-review.md'),
+    `---\nsource: bradygaster/squad/workflows/package/squad-review.md@${head}\n---\n`,
+  );
 
   const previousWorkspace = process.env.GITHUB_WORKSPACE;
   const previousOutput = process.env.SQUAD_TEST_GUARD_OUTPUT;
@@ -264,7 +271,15 @@ async function executeCompiledGuardLoader(
 
 function executeCompiledSafeOutputContract(
   script: string,
-  scenario: 'clean-install' | 'clean-arbitrary' | 'established-missing' | 'configured',
+  scenario:
+    | 'clean-install'
+    | 'clean-arbitrary'
+    | 'established-missing'
+    | 'configured'
+    | 'changed-source'
+    | 'changed-lock'
+    | 'canonical-mismatch'
+    | 'source-fetch-failure',
 ): { status: number | null; diagnostics: string; output?: string } {
   const workspace = mkdtempSync(resolve(ROOT, '.squad-review-live-contract-'));
   compileWorkspaces.push(workspace);
@@ -275,8 +290,16 @@ function executeCompiledSafeOutputContract(
   );
   mkdirSync(dirname(workflowShared), { recursive: true });
   cpSync(resolve(ROOT, 'workflows/shared'), workflowShared, { recursive: true });
-  const guardPath = resolve(workflowShared, 'squad-review-guard.mjs');
-  const guardSha256 = createHash('sha256').update(readFileSync(guardPath)).digest('hex');
+  const workflowReview = resolve(
+    workspace,
+    '.squad-review-workflow',
+    '.github/workflows/squad-review.md',
+  );
+  mkdirSync(dirname(workflowReview), { recursive: true });
+  writeFileSync(
+    workflowReview,
+    LIVE_INSTALL.consumerFiles.get('.github/workflows/squad-review.md')!,
+  );
   if (scenario === 'established-missing' || scenario === 'configured') {
     const baseShared = resolve(workspace, '.squad-review-base', '.github/workflows/shared');
     mkdirSync(dirname(baseShared), { recursive: true });
@@ -292,50 +315,39 @@ function executeCompiledSafeOutputContract(
 
   const head = 'a'.repeat(40);
   const base = 'b'.repeat(40);
-  const workflowNames = [
-    'squad', 'squad-implement-worker', 'squad-review', 'squad-deps-worker',
-    'squad-retro', 'squad-improvement-worker', 'squad-bootstrap', 'squad-command-router',
-  ];
-  const manifest = {
-    schema_version: 1,
-    package: 'bradygaster/squad/workflows',
-    revision_policy: { kind: 'immutable-git-commit' },
-    workflows: workflowNames.map(name => ({
-      name,
-      destination: `.github/workflows/${name}.md`,
-      lock: `.github/workflows/${name}.lock.yml`,
-      source_sha256: 'c'.repeat(64),
-    })),
-    shared_runtime: [{
-      path: 'shared/squad-review-guard.mjs',
-      destination: '.github/workflows/shared/squad-review-guard.mjs',
-      ownership: 'manifest',
-      sha256: guardSha256,
-    }],
-  };
-  const required = [
-    '.github/aw/squad-workflows.manifest.json',
-    '.github/workflows/shared/squad-review-guard.mjs',
-    ...workflowNames.flatMap(name => [
-      `.github/workflows/${name}.md`,
-      `.github/workflows/${name}.lock.yml`,
-    ]),
-  ];
-  const provenance = {
-    schemaVersion: 1,
-    package: 'bradygaster/squad/workflows',
-    source: `bradygaster/squad/workflows@${'c'.repeat(40)}`,
-    resolvedCommit: 'c'.repeat(40),
-    files: required.map(destination => ({
-      destination,
-      sha256: destination === '.github/workflows/shared/squad-review-guard.mjs'
-        ? guardSha256
-        : 'd'.repeat(64),
-    })),
-  };
-  provenance.files.find(entry =>
-    entry.destination === '.github/aw/squad-workflows.manifest.json')!.sha256 =
-      createHash('sha256').update(JSON.stringify(manifest)).digest('hex');
+  const consumerFiles = new Map([...LIVE_INSTALL.consumerFiles].map(
+    ([path, content]) => [path, Buffer.from(content)],
+  ));
+  const canonicalFiles = new Map([...LIVE_INSTALL.canonicalFiles].map(
+    ([path, content]) => [path, Buffer.from(content)],
+  ));
+  if (scenario === 'changed-source') {
+    consumerFiles.set(
+      '.github/workflows/squad.md',
+      Buffer.concat([consumerFiles.get('.github/workflows/squad.md')!, Buffer.from('\nchanged\n')]),
+    );
+  }
+  if (scenario === 'changed-lock') {
+    consumerFiles.set(
+      '.github/workflows/squad.lock.yml',
+      Buffer.concat([
+        consumerFiles.get('.github/workflows/squad.lock.yml')!,
+        Buffer.from('\nchanged\n'),
+      ]),
+    );
+  }
+  if (scenario === 'canonical-mismatch') {
+    canonicalFiles.set(
+      'workflows/package/squad.md',
+      Buffer.concat([canonicalFiles.get('workflows/package/squad.md')!, Buffer.from('\nchanged\n')]),
+    );
+  }
+  const encodedConsumerFiles = Object.fromEntries([...consumerFiles].map(
+    ([path, content]) => [path, content.toString('base64')],
+  ));
+  const encodedCanonicalFiles = Object.fromEntries([...canonicalFiles].map(
+    ([path, content]) => [path, content.toString('base64')],
+  ));
   const outputPath = resolve(workspace, 'agent-output.json');
   writeFileSync(outputPath, JSON.stringify({ items: [{
     type: 'submit_pull_request_review',
@@ -350,12 +362,18 @@ function executeCompiledSafeOutputContract(
     const head = ${JSON.stringify(head)};
     const base = ${JSON.stringify(base)};
     const scenario = ${JSON.stringify(scenario)};
-    const encode = value => ({
-      type: 'file',
-      encoding: 'base64',
-      size: 1000,
-      content: Buffer.from(JSON.stringify(value)).toString('base64'),
-    });
+    const consumerFiles = ${JSON.stringify(encodedConsumerFiles)};
+    const canonicalFiles = ${JSON.stringify(encodedCanonicalFiles)};
+    const provenance = ${JSON.stringify(LIVE_INSTALL.provenance)};
+    const encode = content => {
+      if (!Buffer.isBuffer(content)) content = Buffer.from(JSON.stringify(content));
+      return {
+        type: 'file',
+        encoding: 'base64',
+        size: content.length,
+        content: content.toString('base64'),
+      };
+    };
     const attribution = {
       schema: 'squad-review-author/v1',
       repository: 'squad/example',
@@ -390,7 +408,9 @@ function executeCompiledSafeOutputContract(
           return { data: encode(registry) };
         }
         if (route.endsWith('/contents/.github/aw/squad-workflows.manifest.json')) {
-          return { data: encode(${JSON.stringify(manifest)}) };
+          return { data: encode(Buffer.from(consumerFiles[
+            '.github/aw/squad-workflows.manifest.json'
+          ], 'base64')) };
         }
         if (route.endsWith('/contents/.github/aw/packages')) {
           if (scenario === 'clean-arbitrary') return { data: [] };
@@ -400,8 +420,17 @@ function executeCompiledSafeOutputContract(
           }] };
         }
         if (route.includes('/contents/.github/aw/packages/')) {
-          return { data: encode(${JSON.stringify(provenance)}) };
+          return { data: encode(provenance) };
         }
+        const marker = '/contents/';
+        const path = route.slice(route.indexOf(marker) + marker.length);
+        const sourceRepository = route.startsWith('repos/bradygaster/squad/');
+        if (sourceRepository && scenario === 'source-fetch-failure' &&
+            path === 'workflows/package/squad.md') {
+          throw Object.assign(new Error('source fetch forbidden'), { status: 403 });
+        }
+        const files = sourceRepository ? canonicalFiles : consumerFiles;
+        if (files[path]) return { data: encode(Buffer.from(files[path], 'base64')) };
         if (route.endsWith('/reviews')) return { data: [] };
         throw new Error('Unexpected API route: ' + route + ' ' + JSON.stringify(fields));
       },
@@ -421,7 +450,7 @@ function executeCompiledSafeOutputContract(
       GH_AW_AGENT_OUTPUT: outputPath,
       SQUAD_REVIEW_PR: '42',
       SQUAD_REVIEW_HEAD: head,
-      GH_AW_WORKFLOW_SOURCE: `bradygaster/squad/workflows/package/squad-review.md@${'c'.repeat(40)}`,
+      GH_AW_WORKFLOW_SOURCE: `bradygaster/squad/workflows/package/squad-review.md@${LIVE_INSTALL_REVISION}`,
     },
   });
   return {
@@ -645,7 +674,12 @@ describe('gh-aw enforcing Squad reviewer', () => {
         source: 'workflow',
         operation: name,
         head,
-        options: { firstInstall: true, workflowSha: head, workflowGuardSha256 },
+        options: {
+          firstInstall: true,
+          workflowSha: head,
+          workflowGuardSha256,
+          workflowSource: `bradygaster/squad/workflows/package/squad-review.md@${head}`,
+        },
       }));
 
       await expect(executeCompiledGuardLoader(script, {
@@ -710,6 +744,34 @@ describe('gh-aw enforcing Squad reviewer', () => {
     expect(arbitraryClean.diagnostics).toContain(
       'missing or duplicate first-install package provenance',
     );
+
+    const changedSource = executeCompiledSafeOutputContract(safeOutputScript, 'changed-source');
+    expect(changedSource.status).not.toBe(0);
+    expect(changedSource.diagnostics).toContain(
+      'installed bytes do not match ownership for .github/workflows/squad.md',
+    );
+
+    const changedLock = executeCompiledSafeOutputContract(safeOutputScript, 'changed-lock');
+    expect(changedLock.status).not.toBe(0);
+    expect(changedLock.diagnostics).toContain(
+      'installed compiled lock mismatch for .github/workflows/squad.lock.yml',
+    );
+
+    const canonicalMismatch = executeCompiledSafeOutputContract(
+      safeOutputScript,
+      'canonical-mismatch',
+    );
+    expect(canonicalMismatch.status).not.toBe(0);
+    expect(canonicalMismatch.diagnostics).toContain(
+      'immutable package source digest mismatch for workflows/package/squad.md',
+    );
+
+    const sourceFetchFailure = executeCompiledSafeOutputContract(
+      safeOutputScript,
+      'source-fetch-failure',
+    );
+    expect(sourceFetchFailure.status).not.toBe(0);
+    expect(sourceFetchFailure.diagnostics).toContain('source fetch forbidden');
   }, 30000);
 
   it('kills mutations of every important authority and provenance gate', () => {

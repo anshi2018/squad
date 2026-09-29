@@ -1,6 +1,18 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { evaluateImplementDispatchInputs } from './squad-retro-provenance.mjs';
+import {
+  CONTRACT_DESTINATION,
+  CONTRACT_SOURCE,
+  MIN_GH_AW_VERSION,
+  OWNERSHIP_ENTRY_COUNT,
+  PACKAGE_NAME,
+  RUNTIME_TUPLES,
+  SKILL_TUPLES,
+  WORKFLOW_TUPLES,
+  normalizeCompiledLock,
+  validateContract,
+} from './squad-install-verifier.mjs';
 
 export const CHECK_NAME = 'Squad Review / review';
 export const VERDICT_PREFIX = 'Squad-Review-Verdict: ';
@@ -9,20 +21,12 @@ const WORKFLOW = '.github/workflows/squad-review.lock.yml';
 const SHA = /^[0-9a-f]{40}$/;
 const ID = /^[a-z][a-z0-9-]*$/;
 const BOT = 'github-actions[bot]';
-const INSTALL_MANIFEST = '.github/aw/squad-workflows.manifest.json';
+const INSTALL_MANIFEST = CONTRACT_DESTINATION;
 const INSTALL_PACKAGES = '.github/aw/packages';
 const INSTALL_AUTHOR = '@squad/bootstrap-installation';
 const INSTALL_REVIEWER = '@squad/bootstrap-review-workflow';
-const INSTALL_WORKFLOWS = [
-  'squad',
-  'squad-implement-worker',
-  'squad-review',
-  'squad-deps-worker',
-  'squad-retro',
-  'squad-improvement-worker',
-  'squad-bootstrap',
-  'squad-command-router',
-];
+const INSTALL_SOURCE_REPOSITORY = 'bradygaster/squad';
+const SHA256 = /^[0-9a-f]{64}$/;
 
 function requireThat(condition, message) {
   if (!condition) throw new Error(`Squad review refused: ${message}`);
@@ -103,7 +107,13 @@ async function list(get, route, field) {
   throw new Error('Squad review refused: evidence pagination exceeded bound');
 }
 
-async function committedJsonEvidence(get, repository, path, ref, { allowMissing = false } = {}) {
+async function committedFileEvidence(
+  get,
+  repository,
+  path,
+  ref,
+  { allowMissing = false, maximumSize = 2_000_000 } = {},
+) {
   requireThat(SHA.test(ref), 'invalid committed evidence ref');
   let file;
   try {
@@ -113,11 +123,22 @@ async function committedJsonEvidence(get, repository, path, ref, { allowMissing 
     throw error;
   }
   requireThat(file?.type === 'file' && file.encoding === 'base64' &&
-    typeof file.content === 'string' && file.size <= 65536, `unreadable committed ${path}`);
+    typeof file.content === 'string' && Number.isSafeInteger(file.size) &&
+    file.size >= 0 && file.size <= maximumSize, `unreadable committed ${path}`);
   const content = Buffer.from(file.content, 'base64');
+  requireThat(content.length === file.size, `truncated committed ${path}`);
   return {
-    value: JSON.parse(content.toString('utf8')),
+    content,
     sha256: createHash('sha256').update(content).digest('hex'),
+  };
+}
+
+async function committedJsonEvidence(get, repository, path, ref, options) {
+  const evidence = await committedFileEvidence(get, repository, path, ref, options);
+  if (evidence === undefined) return undefined;
+  return {
+    ...evidence,
+    value: JSON.parse(evidence.content.toString('utf8')),
   };
 }
 
@@ -125,37 +146,45 @@ async function committedJson(get, repository, path, ref, options) {
   return (await committedJsonEvidence(get, repository, path, ref, options))?.value;
 }
 
-function validateFirstInstallManifest(value, guardSha256) {
-  const workflows = Array.isArray(value?.workflows) ? value.workflows : [];
-  const names = workflows.map(entry => entry?.name).sort();
-  const guards = Array.isArray(value?.shared_runtime)
-    ? value.shared_runtime.filter(entry => entry?.path === 'shared/squad-review-guard.mjs')
-    : [];
-  const guard = guards[0];
-  requireThat(value?.schema_version === 1 &&
-    value.package === 'bradygaster/squad/workflows' &&
-    value.revision_policy?.kind === 'immutable-git-commit' &&
-    names.join('\0') === [...INSTALL_WORKFLOWS].sort().join('\0') &&
-    workflows.every(entry =>
-      entry?.destination === `.github/workflows/${entry.name}.md` &&
-      entry?.lock === `.github/workflows/${entry.name}.lock.yml` &&
-      typeof entry?.source_sha256 === 'string' && /^[0-9a-f]{64}$/.test(entry.source_sha256)) &&
-    guards.length === 1 &&
-    guard?.destination === '.github/workflows/shared/squad-review-guard.mjs' &&
-    guard?.ownership === 'manifest' && guard?.sha256 === guardSha256,
-  'invalid committed first-install manifest');
-  return guard;
+function sha256(content) {
+  return createHash('sha256').update(content).digest('hex');
 }
 
-async function validateFirstInstallPackage(
-  get,
-  repository,
-  ref,
-  manifest,
-  manifestSha256,
-  guardSha256,
-  workflowSource,
-) {
+function exactObjectKeys(value, expected, label) {
+  requireThat(exactKeys(value, expected), `invalid ${label} shape`);
+}
+
+function expectedOwnership(manifest) {
+  return [
+    ...manifest.workflows.map(({ source, destination }) => ({ source, destination })),
+    ...manifest.shared_runtime.map(({ source, package_destination: destination }) => ({
+      source,
+      destination,
+    })),
+    { source: CONTRACT_SOURCE, destination: CONTRACT_DESTINATION },
+  ].sort((left, right) => left.destination.localeCompare(right.destination));
+}
+
+function workflowSourceBytes(content, source, revision) {
+  const text = content.toString('utf8');
+  const bindings = [
+    `source: ${PACKAGE_NAME}@${revision}`,
+    `source: bradygaster/squad/${source}@${revision}`,
+  ];
+  let canonical = text;
+  let matches = 0;
+  for (const binding of bindings) {
+    const marker = `\n${binding}\n---\n`;
+    if (canonical.includes(marker)) {
+      canonical = canonical.replace(marker, '\n---\n');
+      matches++;
+    }
+  }
+  requireThat(matches === 1, `installed workflow source binding mismatch for ${source}`);
+  return Buffer.from(canonical);
+}
+
+async function validateFirstInstallPackage(get, repository, ref, workflowSource, guardSha256) {
   const entries = await get(`repos/${repository}/contents/${INSTALL_PACKAGES}`, { ref });
   requireThat(Array.isArray(entries) && entries.length <= 64,
     'unreadable committed first-install package provenance');
@@ -175,33 +204,114 @@ async function validateFirstInstallPackage(
       /^bradygaster\/squad\/workflows\/package\/squad-review\.md@([0-9a-f]{40})$/,
     )
     : undefined;
-  requireThat(provenance?.schemaVersion === 1 &&
-    provenance.package === 'bradygaster/squad/workflows' &&
+  exactObjectKeys(
+    provenance,
+    ['schemaVersion', 'package', 'source', 'resolvedCommit', 'installer', 'files'],
+    'committed first-install package provenance',
+  );
+  requireThat(provenance.schemaVersion === 1 &&
+    provenance.package === PACKAGE_NAME &&
     SHA.test(revision ?? '') &&
-    provenance.source === `bradygaster/squad/workflows@${revision}` &&
-    Array.isArray(provenance.files) &&
-    (workflowSource === undefined || sourceMatch?.[1] === revision),
+    provenance.source === `${PACKAGE_NAME}@${revision}` &&
+    typeof provenance.installer === 'string' &&
+    new RegExp(`^gh-aw ${MIN_GH_AW_VERSION.replaceAll('.', '\\.')}(?:\\b|$)`)
+      .test(provenance.installer) &&
+    Array.isArray(provenance.files) && provenance.files.length === OWNERSHIP_ENTRY_COUNT &&
+    sourceMatch?.[1] === revision,
   'invalid committed first-install package provenance');
-  const files = new Map(provenance.files.map(entry => [entry?.destination, entry]));
-  requireThat(files.size === provenance.files.length,
-    'duplicate committed first-install package paths');
-  const required = [
+
+  const canonicalManifestEvidence = await committedFileEvidence(
+    get,
+    INSTALL_SOURCE_REPOSITORY,
+    CONTRACT_SOURCE,
+    revision,
+  );
+  let manifest;
+  try {
+    manifest = JSON.parse(canonicalManifestEvidence.content.toString('utf8'));
+    validateContract(manifest);
+  } catch (error) {
+    throw new Error(`Squad review refused: invalid immutable package manifest: ${error.message}`);
+  }
+  const installedManifestEvidence = await committedFileEvidence(
+    get,
+    repository,
     INSTALL_MANIFEST,
-    '.github/workflows/shared/squad-review-guard.mjs',
-    ...INSTALL_WORKFLOWS.flatMap(name => [
-      `.github/workflows/${name}.md`,
-      `.github/workflows/${name}.lock.yml`,
-    ]),
-  ];
-  requireThat(required.every(path =>
-    files.get(path)?.destination === path &&
-    typeof files.get(path)?.sha256 === 'string' &&
-    /^[0-9a-f]{64}$/.test(files.get(path).sha256)),
-  'incomplete committed first-install topology');
+    ref,
+  );
   requireThat(
-    files.get('.github/workflows/shared/squad-review-guard.mjs').sha256 === guardSha256 &&
-    files.get(INSTALL_MANIFEST).sha256 === manifestSha256 &&
-    manifest.package === provenance.package,
+    installedManifestEvidence.content.equals(canonicalManifestEvidence.content),
+    'installed manifest is not byte-identical to the immutable package manifest',
+  );
+
+  const expected = expectedOwnership(manifest);
+  const seen = new Set();
+  const installedOwned = new Map();
+  for (let index = 0; index < expected.length; index++) {
+    const owned = provenance.files[index];
+    const trusted = expected[index];
+    exactObjectKeys(owned, ['source', 'destination', 'sha256'], `ownership file ${index}`);
+    requireThat(owned.source === trusted.source && owned.destination === trusted.destination &&
+      SHA256.test(owned.sha256), `moved or malformed ownership file ${index}`);
+    requireThat(!seen.has(owned.destination), `duplicate ownership destination ${owned.destination}`);
+    seen.add(owned.destination);
+    const evidence = await committedFileEvidence(get, repository, owned.destination, ref);
+    requireThat(evidence.sha256 === owned.sha256,
+      `installed bytes do not match ownership for ${owned.destination}`);
+    installedOwned.set(owned.destination, evidence);
+  }
+
+  const canonicalSources = new Map(await Promise.all([
+    ...manifest.workflows.map(entry => entry.source),
+    ...manifest.shared_runtime.map(entry => entry.source),
+    ...manifest.skills.map(entry => entry.source),
+  ].map(async source => [
+    source,
+    await committedFileEvidence(get, INSTALL_SOURCE_REPOSITORY, source, revision),
+  ])));
+
+  for (const entry of manifest.workflows) {
+    const canonical = canonicalSources.get(entry.source);
+    requireThat(canonical.sha256 === entry.source_sha256,
+      `immutable package source digest mismatch for ${entry.source}`);
+    const installed = installedOwned.get(entry.destination);
+    const canonicalized = workflowSourceBytes(installed.content, entry.source, revision);
+    requireThat(
+      sha256(canonicalized) === canonical.sha256 ||
+      sha256(Buffer.from(`${canonicalized.toString('utf8')}\n`)) === canonical.sha256,
+      `installed workflow content mismatch for ${entry.destination}`,
+    );
+    const lock = await committedFileEvidence(get, repository, entry.lock, ref);
+    requireThat(
+      sha256(normalizeCompiledLock(lock.content, revision)) === entry.lock_sha256,
+      `installed compiled lock mismatch for ${entry.lock}`,
+    );
+  }
+
+  for (const entry of manifest.shared_runtime) {
+    const canonical = canonicalSources.get(entry.source);
+    requireThat(canonical.sha256 === entry.sha256,
+      `immutable runtime digest mismatch for ${entry.source}`);
+    const installed = installedOwned.get(entry.package_destination);
+    requireThat(installed.content.equals(canonical.content),
+      `installed runtime content mismatch for ${entry.package_destination}`);
+  }
+
+  for (const entry of manifest.skills) {
+    const canonical = canonicalSources.get(entry.source);
+    requireThat(canonical.sha256 === entry.sha256,
+      `immutable skill digest mismatch for ${entry.source}`);
+    const installed = await committedFileEvidence(get, repository, entry.destination, ref);
+    requireThat(installed.content.equals(canonical.content),
+      `installed skill content mismatch for ${entry.destination}`);
+  }
+
+  const guard = manifest.shared_runtime.find(
+    entry => entry.path === 'shared/squad-review-guard.mjs',
+  );
+  requireThat(guard?.package_destination === '.github/workflows/shared/squad-review-guard.mjs' &&
+    installedOwned.get(guard.package_destination)?.sha256 === guardSha256 &&
+    canonicalSources.get(guard.source)?.sha256 === guardSha256,
   'first-install package does not bind the executing guard');
 }
 
@@ -253,22 +363,12 @@ export async function reviewTarget(
       SHA.test(workflowSha ?? '') && workflowSha === pr.head.sha &&
       typeof workflowGuardSha256 === 'string' && /^[0-9a-f]{64}$/.test(workflowGuardSha256),
     'missing committed attribution outside an immutable clean first install');
-    const manifestEvidence = await committedJsonEvidence(
-      get,
-      repository,
-      INSTALL_MANIFEST,
-      pr.head.sha,
-    );
-    const manifest = manifestEvidence.value;
-    validateFirstInstallManifest(manifest, workflowGuardSha256);
     await validateFirstInstallPackage(
       get,
       repository,
       pr.head.sha,
-      manifest,
-      manifestEvidence.sha256,
-      workflowGuardSha256,
       workflowSource,
+      workflowGuardSha256,
     );
     attribution = {
       schema: 'squad-review-author/v1',
