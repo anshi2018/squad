@@ -3585,11 +3585,23 @@ describe('gh-aw: canonical package integrity contract', () => {
     const ciRuntimeCount = readText(join(process.cwd(), '.github/workflows/squad-ci.yml')).match(
       /find \.github\/workflows\/shared -type f ! -name 'squad-bootstrap-trigger-probe\.json' \| wc -l \| tr -d ' '\)" = (\d+)/,
     );
+    const ci = readText(join(process.cwd(), '.github/workflows/squad-ci.yml'));
     expect(contract.workflows.map((entry: { name: string }) => entry.name)).toEqual(WORKFLOW_NAMES);
     expect(contract.shared_runtime).toHaveLength(RUNTIME_TUPLES.length);
     expect(contract.shared_runtime).toHaveLength(17);
     expect(ciRuntimeCount?.[1], 'strict compile CI runtime cardinality must match the package manifest')
       .toBe(String(contract.shared_runtime.length));
+    const seedStart = ci.indexOf('mkdir -p .github/workflows');
+    const addStart = ci.indexOf('gh aw add --force "$GITHUB_WORKSPACE/workflows"');
+    expect(seedStart, 'clean-consumer CI must seed all dispatched peers before gh aw add compiles')
+      .toBeGreaterThan(-1);
+    expect(addStart).toBeGreaterThan(seedStart);
+    expect(ci.slice(seedStart, addStart)).toContain(
+      `for workflow in ${WORKFLOW_NAMES.join(' ')}; do`,
+    );
+    expect(ci.slice(seedStart, addStart)).toContain(
+      '"$GITHUB_WORKSPACE/workflows/package/${workflow}.md"',
+    );
     expect(contract.shared_runtime).toContainEqual(expect.objectContaining({
       path: 'shared/squad-review-guard.mjs',
       destination: '.github/workflows/shared/squad-review-guard.mjs',

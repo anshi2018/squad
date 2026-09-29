@@ -62,8 +62,8 @@
       "source": "workflows/package/squad-bootstrap.md",
       "destination": ".github/workflows/squad-bootstrap.md",
       "lock": ".github/workflows/squad-bootstrap.lock.yml",
-      "source_sha256": "48f42a3c0d52f2a62b1f6e74049869d615697c1bf4e5e9c1dc95e5c5f607c361",
-      "lock_sha256": "6cfac5b2d8b4f04fe046c51238c14250653a1537c5aaceca3a65f4dcf1def9e1"
+      "source_sha256": "31628b7c0e22760b96c55bcb66c6fbf509a7ff22c3836cd94e75245b401179fc",
+      "lock_sha256": "dea141934a5b9df12629ce08679a262eed953a75cad270c83d5e85c111bf8917"
     },
     {
       "name": "squad-command-router",
@@ -81,7 +81,7 @@
       "package_destination": ".github/workflows/shared/squad-review-guard.mjs",
       "destination": ".github/workflows/shared/squad-review-guard.mjs",
       "ownership": "manifest",
-      "sha256": "5fd6bb0b110903d00936de1e44add687ad24cb463fc06ff988f80a45731337f3"
+      "sha256": "277003226e699bc3de3b3072a64016155d3fc047ac3759dd90624b25b0cc07fa"
     },
     {
       "path": "shared/squad-install-verifier.mjs",

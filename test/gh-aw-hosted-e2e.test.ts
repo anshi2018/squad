@@ -189,7 +189,15 @@ describe('Squad gh-aw hosted E2E controller', () => {
     expect(BOOTSTRAP_WORKFLOW).toContain('SQUAD_BOOTSTRAP_INSTALL_SHA: ${{ github.sha }}');
     expect(BOOTSTRAP_WORKFLOW).toContain('SQUAD_BOOTSTRAP_REPOSITORY: ${{ github.repository }}');
     expect(BOOTSTRAP_WORKFLOW).toContain('SQUAD_BOOTSTRAP_RUN_ID: ${{ github.run_id }}');
-    expect(BOOTSTRAP_WORKFLOW).toContain('<!-- squad:bootstrap-provenance ${JSON.stringify(provenance)} -->');
+    expect(BOOTSTRAP_WORKFLOW).toContain(
+      "const provenancePrefix = '<' + '!-- squad:bootstrap-provenance ';",
+    );
+    expect(BOOTSTRAP_WORKFLOW).toContain(
+      'const provenanceMarker = `${provenancePrefix}${JSON.stringify(provenance)} -->`;',
+    );
+    expect(BOOTSTRAP_WORKFLOW).not.toContain(
+      '<!-- squad:bootstrap-provenance ${JSON.stringify(provenance)} -->',
+    );
     expect(BOOTSTRAP_WORKFLOW).toContain('pullRequestDetails.head.repo?.full_name !== provenance.repository');
     expect(BOOTSTRAP_WORKFLOW).toContain('body: `${provenanceMarker}\\n${prBodyWithoutProvenance}`');
     expect(BOOTSTRAP_WORKFLOW).toContain(

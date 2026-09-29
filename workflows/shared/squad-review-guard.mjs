@@ -13,7 +13,7 @@ const BOOTSTRAP_BRANCH = 'squad/bootstrap-cast';
 const BOOTSTRAP_TITLE = '[squad] Cast your Squad';
 const BOOTSTRAP_AUTHOR = '@squad/base-controlled-bootstrap';
 const BOOTSTRAP_REVIEWER = '@squad/base-controlled-review';
-const BOOTSTRAP_PREFIX = '<!-- squad:bootstrap-provenance ';
+const BOOTSTRAP_PREFIX = '<' + '!-- squad:bootstrap-provenance ';
 
 function requireThat(condition, message) {
   if (!condition) throw new Error(`Squad review refused: ${message}`);

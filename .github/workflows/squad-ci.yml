@@ -778,7 +778,12 @@ jobs:
           git -C "$CONSUMER_DIR" remote add origin https://github.com/example/squad-consumer.git
           (
             cd "$CONSUMER_DIR"
-            gh aw add "$GITHUB_WORKSPACE/workflows"
+            mkdir -p .github/workflows
+            for workflow in squad squad-implement-worker squad-review squad-deps-worker squad-retro squad-improvement-worker squad-bootstrap squad-command-router; do
+              cp "$GITHUB_WORKSPACE/workflows/package/${workflow}.md" \
+                ".github/workflows/${workflow}.md"
+            done
+            gh aw add --force "$GITHUB_WORKSPACE/workflows"
             node .github/workflows/shared/squad-install-verifier.mjs \
               --write-local-test-ownership \
               --source-revision "$SQUAD_SOURCE_REVISION"

@@ -474,9 +474,10 @@ safe-outputs:
                 || pullRequestDetails.head.repo?.full_name !== provenance.repository) {
                 throw new Error('Trusted bootstrap provenance inputs or Cast PR head identity are invalid.');
               }
-              const provenanceMarker = `<!-- squad:bootstrap-provenance ${JSON.stringify(provenance)} -->`;
+              const provenancePrefix = '<' + '!-- squad:bootstrap-provenance ';
+              const provenanceMarker = `${provenancePrefix}${JSON.stringify(provenance)} -->`;
               const prBodyWithoutProvenance = String(pullRequestDetails.body || payload.pr_body)
-                .replace(/^<!-- squad:bootstrap-provenance .* -->\r?\n?/gm, '');
+                .replace(new RegExp(`^${provenancePrefix}.* -->\\r?\\n?`, 'gm'), '');
               await github.rest.pulls.update({
                 ...context.repo,
                 pull_number: pullRequest.number,
@@ -490,7 +491,7 @@ safe-outputs:
                   per_page: 100,
                 },
               )).filter((comment) =>
-                String(comment.body || '').startsWith('<!-- squad:bootstrap-provenance '),
+                String(comment.body || '').startsWith(provenancePrefix),
               );
               if (provenanceComments.length > 1) {
                 throw new Error('Ambiguous bot-authenticated bootstrap provenance comments.');
