@@ -298,17 +298,21 @@ source/lock pairs, and one coherent 40-character revision.
 
 On a clean repository, `gh aw add` reports these expected safe-update changes:
 
-- Restricted secrets: `SQUAD_GITHUB_APP_PRIVATE_KEY` and `SQUAD_GITHUB_TOKEN`
+- Restricted secrets: `SQUAD_GITHUB_APP_PRIVATE_KEY`, `SQUAD_GITHUB_TOKEN`, and
+  `SQUAD_REVIEW_APP_PRIVATE_KEY`
 - Action: `bradygaster/squad/.github/actions/squad-init`
 
 > **These are referenced names, not prerequisites.** `gh aw add` lists the secrets
 > the workflows *reference* so you can approve that surface — it is not asking you
-> to supply them. Both secrets are optional, they need not exist, and you do not
-> need to create either one to enlist a repository. Single-repo activation runs on
-> the built-in `github.token`. Configure these only for cross-repo access or
+> to supply them during compilation. `SQUAD_GITHUB_APP_PRIVATE_KEY` and
+> `SQUAD_GITHUB_TOKEN` remain optional activation credentials; single-repo
+> activation can use the built-in `github.token`. Configure those only for cross-repo access or
 > elevated permissions — see [enhanced permissions with a GitHub
 > App](#optional-enhanced-permissions-with-a-github-app) and [PAT
-> fallback](#optional-pat-fallback).
+> fallback](#optional-pat-fallback). `SQUAD_REVIEW_APP_PRIVATE_KEY` is different:
+> it belongs only in the branch-restricted `squad-review-authority` environment
+> described below. Trusted required-check publication intentionally fails closed
+> until that external prerequisite is provisioned.
 
 Review the report before approving it. If it contains only those documented
 entries, complete the first-install approval with:
@@ -431,6 +435,47 @@ a Personal Access Token:
 | `SQUAD_GITHUB_TOKEN` | Secret | Fallback PAT when no GitHub App is configured |
 
 **Auth precedence:** GitHub App token → `SQUAD_GITHUB_TOKEN` → `github.token`.
+
+### Required: dedicated review authority App
+
+The required `Squad Review / review` check must not use `github.token`.
+`github.token` checks are owned by the shared GitHub Actions App
+(`id: 15368`, slug: `github-actions`), which is also available to ordinary
+same-repository PR workflows. The reviewer instead mints a short-lived token
+for a dedicated GitHub App inside a protected environment and has no fallback.
+
+Before expecting the post-install Cast canary to pass:
+
+1. Create a dedicated GitHub App with repository **Checks: read and write** and
+   read access to Actions, contents, metadata, and pull requests. Install it
+   only on the consumer repository.
+2. Create the Actions environment **`squad-review-authority`**.
+3. Configure a custom deployment branch policy containing exactly the
+   repository default branch. Do not allow wildcard, feature, release, tag, or
+   additional branch policies; a PR workflow must not be able to request this
+   environment from its own ref.
+4. Store these reviewer-specific values in that environment, not as
+   repository-level Actions secrets or variables:
+
+   | Setting | Type | Purpose |
+   |---------|------|---------|
+   | `SQUAD_REVIEW_APP_ID` | Variable | Dedicated App numeric ID; must not be `15368` |
+   | `SQUAD_REVIEW_APP_SLUG` | Variable | Dedicated App slug; must not be `github-actions` |
+   | `SQUAD_REVIEW_APP_OWNER` | Variable | Repository owner where the App is installed |
+   | `SQUAD_REVIEW_APP_PRIVATE_KEY` | Secret | Dedicated App private key |
+
+The publisher validates the configured ID and slug, mints an installation token
+inside the environment, publishes with that token, and validates the App
+identity returned by the Checks API. Missing environment protection, missing
+credentials, token-mint failure, Actions App identity, or any ID/slug mismatch
+fails closed. An ordinary `github.token` may create a same-named check owned by
+the Actions App, but it cannot update the dedicated App's check and cannot
+satisfy an integration-bound ruleset.
+
+Before rollout, verify the four reviewer-specific names are absent from
+repository-level Actions secrets and variables. GitHub expression contexts can
+otherwise fall back to a repository-scoped value with the same name. The hosted
+controller treats that overlap as a hard configuration error.
 
 ---
 
@@ -1551,15 +1596,21 @@ generated bundle through the explicit human installation boundary, then observe
 a successful base-controlled `pull_request_target` check on the post-install
 draft Cast PR before
 changing rulesets. The installation PR itself is not evidence: its workflow and
-check name are controlled by that PR. Record the activation canary's actual
+check name are controlled by that PR. The Cast canary remains intentionally red
+until the [dedicated review authority App](#required-dedicated-review-authority-app)
+and exact-default-branch environment policy are provisioned. Record the
+activation canary's actual
 check name, external ID, details URL, attestation summary, and GitHub App ID
-from the check-runs API. Enable the required context with that observed App ID
+and slug from the check-runs API. The attestation's `publisher_app_id` and
+`publisher_app_slug` must equal the check's returned App identity and must not
+be `15368`/`github-actions`. Enable the required context with that observed App ID
 on `dev` **only after advisory soak** has met the
 evidence gate in #1734; promote to `main` after the agreed soak. This change
 does not modify repository rulesets and does not claim live soak evidence. Keep
 native human approving-review requirements enabled independently, with stale
 approvals dismissed. The bot's `COMMENT` is not a human approval. Do not use an
-unobserved guessed App ID or require the manual job.
+unobserved guessed App ID, a user-supplied integration ID, an Actions-owned
+same-name check, or the manual job.
 Because rulesets apply to all PRs, existing human/Copilot PRs must add committed
 attribution before enabling the requirement. Fork review remains unsupported;
 the workflow rejects foreign head repositories even though its base-controlled

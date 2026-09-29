@@ -39,6 +39,9 @@ const RESEARCH_MARKER = '<!-- squad:bootstrap-opportunities schema=1 -->';
 const PROVENANCE_MARKER_PATTERN = /^<!-- squad:bootstrap-provenance (\{[^\r\n]+\}) -->$/gm;
 const ACTIONS_BOT_LOGIN = 'github-actions[bot]';
 const ACTIONS_BOT_ID = 41898282;
+const ACTIONS_APP_ID = 15368;
+const ACTIONS_APP_SLUG = 'github-actions';
+const REVIEW_AUTHORITY_ENVIRONMENT = 'squad-review-authority';
 const SAFE_CHILD_ENV = Object.freeze([
   'CI',
   'GH_CONFIG_DIR',
@@ -367,6 +370,113 @@ export function guardedTargetMutation({
   return mutate();
 }
 
+export function validateReviewAuthorityEnvironment(
+  environment,
+  branchPolicies,
+  secretNames,
+  variables,
+  repositorySecretNames,
+  repositoryVariableNames,
+  defaultBranch,
+  targetOwner,
+) {
+  if (environment?.name !== REVIEW_AUTHORITY_ENVIRONMENT
+    || environment.deployment_branch_policy?.custom_branch_policies !== true
+    || environment.deployment_branch_policy?.protected_branches !== false) {
+    throw new Error(
+      'Dedicated review authority environment must use an exact custom default-branch policy.',
+    );
+  }
+  if (!Array.isArray(branchPolicies)
+    || branchPolicies.length !== 1
+    || branchPolicies[0]?.type !== 'branch'
+    || branchPolicies[0]?.name !== defaultBranch) {
+    throw new Error(
+      'Dedicated review authority environment must allow only the repository default branch.',
+    );
+  }
+  if (!secretNames.includes('SQUAD_REVIEW_APP_PRIVATE_KEY')) {
+    throw new Error('Dedicated review authority environment is missing its reviewer App private key.');
+  }
+  const reviewerNames = new Set([
+    'SQUAD_REVIEW_APP_ID',
+    'SQUAD_REVIEW_APP_SLUG',
+    'SQUAD_REVIEW_APP_OWNER',
+    'SQUAD_REVIEW_APP_PRIVATE_KEY',
+  ]);
+  if (repositorySecretNames.some((name) => reviewerNames.has(name))
+    || repositoryVariableNames.some((name) => reviewerNames.has(name))) {
+    throw new Error('Reviewer App credentials must not exist at repository scope.');
+  }
+  const values = Object.fromEntries(variables.map(({ name, value }) => [name, value]));
+  const appId = Number(values.SQUAD_REVIEW_APP_ID);
+  const appSlug = values.SQUAD_REVIEW_APP_SLUG;
+  const appOwner = values.SQUAD_REVIEW_APP_OWNER;
+  if (!Number.isSafeInteger(appId) || appId < 1 || appId === ACTIONS_APP_ID
+    || typeof appSlug !== 'string' || !/^[a-z0-9][a-z0-9-]*$/.test(appSlug)
+    || appSlug === ACTIONS_APP_SLUG || appOwner !== targetOwner) {
+    throw new Error('Dedicated review authority App variables are missing or misconfigured.');
+  }
+  return { id: appId, slug: appSlug, owner: appOwner };
+}
+
+function reviewAuthorityEnvironment(target, defaultBranch) {
+  const [targetOwner] = target.split('/');
+  const environment = ghJson([
+    'api', `repos/${target}/environments/${REVIEW_AUTHORITY_ENVIRONMENT}`,
+  ]);
+  const branchPolicies = ghJson([
+    'api', '--paginate', '--slurp',
+    `repos/${target}/environments/${REVIEW_AUTHORITY_ENVIRONMENT}/deployment-branch-policies?per_page=100`,
+  ]).flat().flatMap((page) => page.branch_policies ?? []);
+  const secretNames = ghJson([
+    'api',
+    `repos/${target}/environments/${REVIEW_AUTHORITY_ENVIRONMENT}/secrets?per_page=100`,
+    '--jq', '[.secrets[].name]',
+  ]);
+  const variables = ghJson([
+    'api',
+    `repos/${target}/environments/${REVIEW_AUTHORITY_ENVIRONMENT}/variables?per_page=100`,
+    '--jq', '[.variables[] | {name,value}]',
+  ]);
+  const repositorySecretNames = ghJson([
+    'api', `repos/${target}/actions/secrets?per_page=100`,
+    '--jq', '[.secrets[].name]',
+  ]);
+  const repositoryVariableNames = ghJson([
+    'api', `repos/${target}/actions/variables?per_page=100`,
+    '--jq', '[.variables[].name]',
+  ]);
+  return validateReviewAuthorityEnvironment(
+    environment,
+    branchPolicies,
+    secretNames,
+    variables,
+    repositorySecretNames,
+    repositoryVariableNames,
+    defaultBranch,
+    targetOwner,
+  );
+}
+
+export function observedRequiredCheck(check, attestation) {
+  if (check?.name !== 'Squad Review / review'
+    || !Number.isSafeInteger(check.app?.id)
+    || check.app.id < 1
+    || check.app.id === ACTIONS_APP_ID
+    || typeof check.app?.slug !== 'string'
+    || check.app.slug === ACTIONS_APP_SLUG
+    || attestation?.publisher_app_id !== check.app.id
+    || attestation?.publisher_app_slug !== check.app.slug) {
+    throw new Error('Required-check rollout must use the observed dedicated App identity.');
+  }
+  return {
+    context: check.name,
+    integration_id: check.app.id,
+    integration_slug: check.app.slug,
+  };
+}
+
 export function authorizeTarget(args, sourceInfo, contract, github = githubAdapter) {
   const target = requireArg(args, 'target');
   const expectedRepositoryId = Number(requireArg(args, 'target_repository_id'));
@@ -404,8 +514,9 @@ export function authorizeTarget(args, sourceInfo, contract, github = githubAdapt
     || workflowPermissions.can_approve_pull_request_reviews !== true) {
     throw new Error('Target Actions permissions do not match the supported secure configuration.');
   }
+  const reviewApp = reviewAuthorityEnvironment(target, info.default_branch);
   const baseline = assertPristineTarget(target, info.default_branch, contract, github);
-  return { target, info, workflowPermissions, actor, baseline };
+  return { target, info, workflowPermissions, actor, reviewApp, baseline };
 }
 
 function waitForBootstrapRun(target, headSha, startedAt, evidence) {
@@ -565,7 +676,7 @@ export function waitForBootstrapOutputs(
   throw new Error('Timed out waiting for the draft Cast PR and bootstrap research issue.');
 }
 
-function waitForBaseControlledReviewCanary(target, castPr, evidence) {
+function waitForBaseControlledReviewCanary(target, castPr, expectedApp, evidence) {
   const deadline = Date.now() + 20 * 60 * 1000;
   while (Date.now() < deadline) {
     const checks = ghJson([
@@ -580,8 +691,8 @@ function waitForBaseControlledReviewCanary(target, castPr, evidence) {
       check.name === 'Squad Review / review' &&
       check.external_id === externalId &&
       check.head_sha === castPr.headSha &&
-      check.app?.id === 15368 &&
-      check.app?.slug === 'github-actions');
+      check.app?.id === expectedApp.id &&
+      check.app?.slug === expectedApp.slug);
     if (trustedChecks.length > 1) {
       throw new Error(`Expected one base-controlled Squad Review canary check; found ${trustedChecks.length}.`);
     }
@@ -633,11 +744,16 @@ function waitForBaseControlledReviewCanary(target, castPr, evidence) {
         || attestation.event !== 'pull_request_target'
         || attestation.workflow_path !== '.github/workflows/squad-review.lock.yml'
         || attestation.authority_job !== 'Squad Review Authority / attest'
+        || attestation.publisher_app_id !== expectedApp.id
+        || attestation.publisher_app_slug !== expectedApp.slug
+        || check.app?.id === ACTIONS_APP_ID
+        || check.app?.slug === ACTIONS_APP_SLUG
         || check.details_url !== `https://github.com/${target}/actions/runs/${verdict.run_id}`) {
         throw new Error('Squad Review canary check is not bound to the base-controlled authority run.');
       }
       writeJson(resolve(evidence, 'base-controlled-review-canary.json'), {
         pull_request: castPr,
+        observed_required_check: observedRequiredCheck(check, attestation),
         check,
         review: verdicts[0],
         verdict,
@@ -821,6 +937,7 @@ function hosted(args, repositoryRoot) {
     const reviewCanary = waitForBaseControlledReviewCanary(
       targetState.target,
       outputs.castPr,
+      targetState.reviewApp,
       evidence,
     );
 

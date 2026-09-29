@@ -136,33 +136,63 @@ jobs:
       - safe_outputs
       - review
     runs-on: ubuntu-latest
+    environment: squad-review-authority
     permissions:
       actions: read
-      checks: write
       contents: read
       pull-requests: read
     steps:
+      - name: Validate dedicated reviewer App configuration
+        env:
+          SQUAD_REVIEW_APP_ID: ${{ vars.SQUAD_REVIEW_APP_ID }}
+          SQUAD_REVIEW_APP_SLUG: ${{ vars.SQUAD_REVIEW_APP_SLUG }}
+          SQUAD_REVIEW_APP_OWNER: ${{ vars.SQUAD_REVIEW_APP_OWNER }}
+          SQUAD_REVIEW_APP_PRIVATE_KEY: ${{ secrets.SQUAD_REVIEW_APP_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          test "${SQUAD_REVIEW_APP_ID}" != "15368"
+          test "${SQUAD_REVIEW_APP_SLUG}" != "github-actions"
+          [[ "${SQUAD_REVIEW_APP_ID}" =~ ^[1-9][0-9]*$ ]]
+          [[ "${SQUAD_REVIEW_APP_SLUG}" =~ ^[a-z0-9][a-z0-9-]*$ ]]
+          [[ "${SQUAD_REVIEW_APP_OWNER}" =~ ^[A-Za-z0-9_.-]+$ ]]
+          test -n "${SQUAD_REVIEW_APP_PRIVATE_KEY}"
+      - name: Mint dedicated reviewer App token
+        id: squad-review-app-token
+        uses: actions/create-github-app-token@v3.2.0
+        with:
+          app-id: ${{ vars.SQUAD_REVIEW_APP_ID }}
+          private-key: ${{ secrets.SQUAD_REVIEW_APP_PRIVATE_KEY }}
+          owner: ${{ vars.SQUAD_REVIEW_APP_OWNER }}
       - name: Publish exact-head required check
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3
         env:
           AUTHORITY_RESULT: ${{ needs.review.result }}
+          SQUAD_REVIEW_APP_ID: ${{ vars.SQUAD_REVIEW_APP_ID }}
+          SQUAD_REVIEW_APP_SLUG: ${{ vars.SQUAD_REVIEW_APP_SLUG }}
           SQUAD_REVIEW_PR: ${{ github.event.pull_request.number }}
           SQUAD_REVIEW_BASE: ${{ github.event.pull_request.base.sha }}
           SQUAD_REVIEW_HEAD: ${{ github.event.pull_request.head.sha }}
           SQUAD_REVIEW_WORKFLOW_SHA: ${{ github.workflow_sha }}
         with:
+          github-token: ${{ steps.squad-review-app-token.outputs.token }}
           script: |
             const checkName = 'Squad Review / review';
             const authorityJob = 'Squad Review Authority / attest';
             const repository = process.env.GITHUB_REPOSITORY;
             const [owner, repo] = repository.split('/');
+            const expectedAppId = Number(process.env.SQUAD_REVIEW_APP_ID);
+            const expectedAppSlug = process.env.SQUAD_REVIEW_APP_SLUG;
             const pullRequest = Number(process.env.SQUAD_REVIEW_PR);
             const baseSha = process.env.SQUAD_REVIEW_BASE;
             const headSha = process.env.SQUAD_REVIEW_HEAD;
             const workflowSha = process.env.SQUAD_REVIEW_WORKFLOW_SHA;
             const runId = Number(process.env.GITHUB_RUN_ID);
             const runAttempt = Number(process.env.GITHUB_RUN_ATTEMPT);
-            if (!Number.isSafeInteger(pullRequest) || pullRequest < 1 ||
+            if (!Number.isSafeInteger(expectedAppId) || expectedAppId < 1 ||
+                expectedAppId === 15368 ||
+                !/^[a-z0-9][a-z0-9-]*$/.test(expectedAppSlug) ||
+                expectedAppSlug === 'github-actions' ||
+                !Number.isSafeInteger(pullRequest) || pullRequest < 1 ||
                 !/^[0-9a-f]{40}$/.test(baseSha) || !/^[0-9a-f]{40}$/.test(headSha) ||
                 workflowSha !== baseSha || !Number.isSafeInteger(runId) || runId < 1 ||
                 !Number.isSafeInteger(runAttempt) || runAttempt < 1) {
@@ -194,7 +224,10 @@ jobs:
             const existing = await github.paginate(github.rest.checks.listForRef, {
               owner, repo, ref: headSha, check_name: checkName, per_page: 100,
             });
-            const owned = existing.filter(check => check.external_id === externalId);
+            const owned = existing.filter(check =>
+              check.external_id === externalId &&
+              check.app?.id === expectedAppId &&
+              check.app?.slug === expectedAppSlug);
             if (owned.length > 1) {
               core.setFailed('Duplicate exact-head Squad review authority checks.');
               return;
@@ -217,6 +250,8 @@ jobs:
                 event: 'pull_request_target',
                 workflow_path: '.github/workflows/squad-review.lock.yml',
                 authority_job: authorityJob,
+                publisher_app_id: expectedAppId,
+                publisher_app_slug: expectedAppSlug,
               }),
             };
             const request = {
@@ -227,13 +262,24 @@ jobs:
               external_id: externalId,
               output,
             };
-            if (owned.length === 1) {
-              await github.rest.checks.update({
+            const published = owned.length === 1
+              ? await github.rest.checks.update({
                 ...request,
                 check_run_id: owned[0].id,
-              });
-            } else {
-              await github.rest.checks.create(request);
+              })
+              : await github.rest.checks.create(request);
+            if (published.data.app?.id !== expectedAppId ||
+                published.data.app?.slug !== expectedAppSlug) {
+              try {
+                await github.rest.checks.delete({
+                  owner, repo, check_run_id: published.data.id,
+                });
+              } finally {
+                core.setFailed(
+                  'Squad review check was not published by the configured dedicated GitHub App.'
+                );
+              }
+              return;
             }
             if (!succeeded) {
               core.setFailed('Base-controlled Squad review authority did not succeed.');

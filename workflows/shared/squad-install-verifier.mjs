@@ -516,6 +516,7 @@ export function checkSource(root) {
     const digests = expectedEmbeddedDigests(root);
     const dispatcher = readFileSync(resolve(root, 'workflows/squad.md'), 'utf8');
     const bootstrap = readFileSync(resolve(root, 'workflows/squad-bootstrap.md'), 'utf8');
+    const reviewer = readFileSync(resolve(root, 'workflows/squad-review.md'), 'utf8');
     if (!dispatcher.includes(`validator_expected_sha256="${digests.cast}"`)) {
       failures.push('Generated Cast validator digest is stale in workflows/squad.md.');
     }
@@ -533,6 +534,22 @@ export function checkSource(root) {
       else if (readFileSync(path, 'utf8') !== expected) {
         failures.push(`Generated package file is stale: ${relative(root, path)} (run: npm run gh-aw:integrity:write)`);
       }
+    }
+    for (const required of [
+      'environment: squad-review-authority',
+      'SQUAD_REVIEW_APP_PRIVATE_KEY: ${{ secrets.SQUAD_REVIEW_APP_PRIVATE_KEY }}',
+      'github-token: ${{ steps.squad-review-app-token.outputs.token }}',
+      'published.data.app?.id !== expectedAppId',
+      "expectedAppId === 15368",
+      "expectedAppSlug === 'github-actions'",
+    ]) {
+      if (!reviewer.includes(required)) {
+        failures.push(`Dedicated review authority contract is missing: ${required}`);
+      }
+    }
+    const publishJob = reviewer.match(/\n  publish:\n([\s\S]*?)\n---\n/)?.[1] ?? '';
+    if (publishJob.includes('checks: write')) {
+      failures.push('Dedicated review publisher must not grant checks:write to github.token.');
     }
   } catch (error) {
     failures.push(error instanceof Error ? error.message : String(error));

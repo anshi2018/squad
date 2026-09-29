@@ -126,6 +126,84 @@ interface CompiledContract {
   safeOutputs: Record<string, Record<string, unknown>>;
 }
 
+async function executePublisher(
+  script: string,
+  {
+    publishedApp,
+    existing = [],
+    updateError,
+  }: {
+    publishedApp: { id: number; slug: string };
+    existing?: Array<Record<string, unknown>>;
+    updateError?: Error;
+  },
+): Promise<{ failures: string[]; created: number; updated: number; deleted: number }> {
+  const failures: string[] = [];
+  let created = 0;
+  let updated = 0;
+  let deleted = 0;
+  const listJobs = async () => undefined;
+  const listChecks = async () => undefined;
+  const github = {
+    paginate: async (method: unknown) => method === listJobs
+      ? [{ name: 'Squad Review Authority / attest', conclusion: 'success' }]
+      : existing,
+    rest: {
+      actions: {
+        getWorkflowRun: async () => ({ data: {
+          event: 'pull_request_target',
+          path: '.github/workflows/squad-review.lock.yml',
+          head_sha: 'b'.repeat(40),
+          repository: { full_name: 'squad/example' },
+        } }),
+        listJobsForWorkflowRunAttempt: listJobs,
+      },
+      checks: {
+        listForRef: listChecks,
+        create: async () => {
+          created++;
+          return { data: { id: 88, app: publishedApp } };
+        },
+        update: async () => {
+          updated++;
+          if (updateError) throw updateError;
+          return { data: { id: 88, app: publishedApp } };
+        },
+        delete: async () => {
+          deleted++;
+          return { data: {} };
+        },
+      },
+    },
+  };
+  const core = { setFailed: (message: string) => failures.push(message) };
+  const previous = { ...process.env };
+  Object.assign(process.env, {
+    AUTHORITY_RESULT: 'success',
+    GITHUB_REPOSITORY: 'squad/example',
+    GITHUB_RUN_ID: '17',
+    GITHUB_RUN_ATTEMPT: '1',
+    GITHUB_SERVER_URL: 'https://github.com',
+    SQUAD_REVIEW_APP_ID: '424242',
+    SQUAD_REVIEW_APP_SLUG: 'squad-review-authority',
+    SQUAD_REVIEW_PR: '42',
+    SQUAD_REVIEW_BASE: 'b'.repeat(40),
+    SQUAD_REVIEW_HEAD: 'a'.repeat(40),
+    SQUAD_REVIEW_WORKFLOW_SHA: 'b'.repeat(40),
+  });
+  try {
+    const run = new Function(
+      'github',
+      'core',
+      `return (async () => {\n${script}\n})();`,
+    ) as (github: unknown, core: unknown) => Promise<void>;
+    await run(github, core);
+  } finally {
+    process.env = previous;
+  }
+  return { failures, created, updated, deleted };
+}
+
 function compileReviewer(workflow = REVIEWER): CompiledContract {
   const workspace = mkdtempSync(resolve(ROOT, '.squad-review-contract-'));
   compileWorkspaces.push(workspace);
@@ -205,20 +283,39 @@ function assertCompiledGate(lock: string): void {
   expect(publish.name).toBe('Publish Squad Review required check');
   expect(publish.if).toBe('always()');
   expect(publish.needs).toEqual(expect.arrayContaining(['agent', 'safe_outputs', 'review']));
+  expect(publish.environment).toBe('squad-review-authority');
   expect(publish.permissions).toMatchObject({
     actions: 'read',
-    checks: 'write',
     contents: 'read',
     'pull-requests': 'read',
   });
+  expect(publish.permissions.checks).toBeUndefined();
+  const validateStep = publish.steps.find((step: { name: string }) =>
+    step.name === 'Validate dedicated reviewer App configuration');
+  expect(validateStep.env.SQUAD_REVIEW_APP_ID).toBe('${{ vars.SQUAD_REVIEW_APP_ID }}');
+  expect(validateStep.env.SQUAD_REVIEW_APP_SLUG).toBe('${{ vars.SQUAD_REVIEW_APP_SLUG }}');
+  expect(validateStep.env.SQUAD_REVIEW_APP_OWNER).toBe('${{ vars.SQUAD_REVIEW_APP_OWNER }}');
+  expect(validateStep.env.SQUAD_REVIEW_APP_PRIVATE_KEY)
+    .toBe('${{ secrets.SQUAD_REVIEW_APP_PRIVATE_KEY }}');
+  expect(validateStep.run).toContain('test "${SQUAD_REVIEW_APP_ID}" != "15368"');
+  expect(validateStep.run).toContain('test "${SQUAD_REVIEW_APP_SLUG}" != "github-actions"');
+  const mintStep = publish.steps.find((step: { name: string }) =>
+    step.name === 'Mint dedicated reviewer App token');
+  expect(mintStep.uses).toMatch(/^actions\/create-github-app-token@[0-9a-f]{40}$/);
+  expect(mintStep['continue-on-error']).toBeUndefined();
   const publishStep = publish.steps.find((step: { name: string }) =>
     step.name === 'Publish exact-head required check');
+  expect(publishStep.with['github-token'])
+    .toBe('${{ steps.squad-review-app-token.outputs.token }}');
   expect(publishStep.with.script).toContain("const checkName = 'Squad Review / review'");
   expect(publishStep.with.script).toContain("run.event !== 'pull_request_target'");
   expect(publishStep.with.script).toContain('run.head_sha !== workflowSha');
   expect(publishStep.with.script).toContain('authorityJobs.length !== 1');
   expect(publishStep.with.script).toContain("external_id: externalId");
   expect(publishStep.with.script).toContain("head_sha: headSha");
+  expect(publishStep.with.script).toContain('published.data.app?.id !== expectedAppId');
+  expect(publishStep.with.script).toContain('publisher_app_id: expectedAppId');
+  expect(publishStep.with.script).toContain('publisher_app_slug: expectedAppSlug');
   expect(publishStep.with.script).not.toContain('github.event.pull_request.head.ref');
   expect(lock).not.toContain('Checkout PR branch');
   expect(lock).not.toMatch(/uses:\s+\.\/\.github\/actions\//);
@@ -303,6 +400,42 @@ async function executeCompiledGuardLoader(
 }
 
 describe('gh-aw enforcing Squad reviewer', () => {
+  it('rejects ordinary-token publication and accepts the dedicated App identity', async () => {
+    const { lock } = compileReviewer();
+    const workflow = parse(lock);
+    const publishStep = workflow.jobs.publish.steps.find((step: { name: string }) =>
+      step.name === 'Publish exact-head required check');
+    const ordinary = await executePublisher(publishStep.with.script, {
+      publishedApp: { id: 15368, slug: 'github-actions' },
+    });
+    expect(ordinary).toEqual({
+      failures: ['Squad review check was not published by the configured dedicated GitHub App.'],
+      created: 1,
+      updated: 0,
+      deleted: 1,
+    });
+    const dedicated = await executePublisher(publishStep.with.script, {
+      publishedApp: { id: 424242, slug: 'squad-review-authority' },
+    });
+    expect(dedicated).toEqual({ failures: [], created: 1, updated: 0, deleted: 0 });
+  });
+
+  it('cannot update the dedicated App check with an ordinary workflow token', async () => {
+    const { lock } = compileReviewer();
+    const workflow = parse(lock);
+    const publishStep = workflow.jobs.publish.steps.find((step: { name: string }) =>
+      step.name === 'Publish exact-head required check');
+    await expect(executePublisher(publishStep.with.script, {
+      publishedApp: { id: 15368, slug: 'github-actions' },
+      existing: [{
+        id: 88,
+        external_id: `squad-review-authority/v1:squad/example:42:${'b'.repeat(40)}:${'a'.repeat(40)}`,
+        app: { id: 424242, slug: 'squad-review-authority' },
+      }],
+      updateError: Object.assign(new Error('Resource not accessible by integration'), { status: 403 }),
+    })).rejects.toMatchObject({ status: 403 });
+  });
+
   it('keeps review automatic and makes /squad review a non-dispatching rerun guide', () => {
     const routerDispatch = yamlBlock(ROUTER_FRONTMATTER, 'dispatch-workflow');
     const reviewTrigger = yamlBlock(REVIEWER_FRONTMATTER, 'on');

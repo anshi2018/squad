@@ -16,6 +16,8 @@ const SUBMITTED = '2026-09-28T12:01:01Z';
 const FINISHED = '2026-09-28T12:02:00Z';
 const MERGED = '2026-09-28T12:03:00Z';
 const NOW = Date.parse('2026-09-28T12:04:00Z');
+const REVIEW_APP_ID = 424242;
+const REVIEW_APP_SLUG = 'squad-review-authority';
 const workspaces: string[] = [];
 
 afterEach(() => {
@@ -85,7 +87,7 @@ function fixture(relay = false) {
     conclusion: 'success',
     completed_at: FINISHED,
     details_url: `https://github.com/${REPOSITORY}/actions/runs/17`,
-    app: { id: 15368, slug: 'github-actions' },
+    app: { id: REVIEW_APP_ID, slug: REVIEW_APP_SLUG },
     output: {
       summary: JSON.stringify({
         schema: 'squad-review-check/v1',
@@ -99,6 +101,8 @@ function fixture(relay = false) {
         event: 'pull_request_target',
         workflow_path: '.github/workflows/squad-review.lock.yml',
         authority_job: 'Squad Review Authority / attest',
+        publisher_app_id: REVIEW_APP_ID,
+        publisher_app_slug: REVIEW_APP_SLUG,
       }),
     },
   }];
@@ -282,6 +286,27 @@ describe('independent Squad review guard', () => {
     }
   });
 
+  it('ignores an ordinary-token forged check and accepts only the dedicated App check', async () => {
+    const f = fixture(true);
+    f.checkRuns.unshift({
+      ...structuredClone(f.checkRuns[0]),
+      id: 87,
+      app: { id: 15368, slug: 'github-actions' },
+      output: {
+        summary: JSON.stringify({
+          ...JSON.parse(f.checkRuns[0].output.summary),
+          publisher_app_id: 15368,
+          publisher_app_slug: 'github-actions',
+        }),
+      },
+    });
+    await expect(assertClearingReview(f.env, f.get, { relay: true }))
+      .resolves.toEqual(f.verdict);
+    f.checkRuns.splice(1);
+    await expect(assertClearingReview(f.env, f.get, { relay: true }))
+      .rejects.toThrow('missing or duplicate exact-head authority check');
+  });
+
   it('refuses PR-controlled shaped review, job, check, and artifact evidence', async () => {
     const f = fixture(true);
     f.run.event = 'pull_request';
@@ -355,7 +380,8 @@ describe('independent Squad review guard', () => {
     'wrong-branch', 'duplicate-marker', 'stale-head', 'foreign-head', 'foreign-base', 'head-race',
     'not-merged', 'wrong-base', 'merge-before-review', 'merge-before-check',
     'failed-run', 'failed-check', 'missing-check', 'duplicate-check', 'wrong-check',
-    'forged-check', 'wrong-check-app', 'wrong-check-attestation',
+    'forged-check', 'actions-app-check', 'wrong-check-app', 'wrong-check-app-slug',
+    'wrong-check-attestation', 'wrong-attested-app-id', 'wrong-attested-app-slug',
     'manual-run', 'wrong-workflow', 'wrong-run-repo', 'wrong-run-sha', 'wrong-run-pr',
     'wrong-run-attempt', 'wrong-run-title', 'verdict-before-run',
     'wrong-bot-id', 'wrong-bot-type',
@@ -399,7 +425,24 @@ describe('independent Squad review guard', () => {
       case 'wrong-bot-id': f.review.user.id = 1; break;
       case 'wrong-bot-type': f.review.user.type = 'User'; break;
       case 'forged-check': f.checkRuns[0].external_id = 'forged'; break;
+      case 'actions-app-check':
+        f.checkRuns[0].app = { id: 15368, slug: 'github-actions' };
+        f.checkRuns[0].output.summary = JSON.stringify({
+          ...JSON.parse(f.checkRuns[0].output.summary),
+          publisher_app_id: 15368,
+          publisher_app_slug: 'github-actions',
+        });
+        break;
       case 'wrong-check-app': f.checkRuns[0].app.id = 1; break;
+      case 'wrong-check-app-slug': f.checkRuns[0].app.slug = 'other-review-app'; break;
+      case 'wrong-attested-app-id': f.checkRuns[0].output.summary = JSON.stringify({
+        ...JSON.parse(f.checkRuns[0].output.summary),
+        publisher_app_id: 1,
+      }); break;
+      case 'wrong-attested-app-slug': f.checkRuns[0].output.summary = JSON.stringify({
+        ...JSON.parse(f.checkRuns[0].output.summary),
+        publisher_app_slug: 'other-review-app',
+      }); break;
       case 'wrong-check-attestation': f.checkRuns[0].output.summary = JSON.stringify({
         ...JSON.parse(f.checkRuns[0].output.summary),
         event: 'pull_request',
