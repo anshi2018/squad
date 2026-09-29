@@ -1,11 +1,9 @@
 import { afterAll, describe, expect, it } from 'vitest';
 import { cpSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { extractSafeOutputsConfigJson } from './helpers/gh-aw-lock.js';
-import { createFirstInstallFixture } from './helpers/gh-aw-install-fixture.js';
 import { parse } from 'yaml';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -19,8 +17,6 @@ const SHARED_BOOTSTRAP = read('workflows/shared/squad.md');
 const REVIEWER_FRONTMATTER = frontmatter(REVIEWER);
 const ROUTER_FRONTMATTER = frontmatter(ROUTER);
 const compileWorkspaces: string[] = [];
-const LIVE_INSTALL_REVISION = 'c'.repeat(40);
-const LIVE_INSTALL = createFirstInstallFixture(LIVE_INSTALL_REVISION);
 
 function read(relativePath: string): string {
   return readFileSync(resolve(ROOT, relativePath), 'utf8').replace(/\r\n/g, '\n');
@@ -108,6 +104,8 @@ function assertReviewerContract(workflow: string): void {
   expect(workflow).toContain('inlined-imports: true');
   expect(workflow).toContain('await guard.enforceReviewOutputs');
   expect(workflow).toContain('await guard.assertClearingReview');
+  expect(workflow).toContain('The workflow-installation PR is an explicit human trust boundary.');
+  expect(workflow).toContain('Trusted review starts on the automatic post-merge Cast PR.');
   expect(workflow).toContain('Human approval remains mandatory.');
 }
 
@@ -169,27 +167,23 @@ function assertCompiledGate(lock: string): void {
   expect(steps[guard]['continue-on-error']).toBeUndefined();
   const baseCheckout = steps.find((step: { name: string }) =>
     step.name === 'Checkout base commit for review guard');
-  const workflowCheckout = steps.find((step: { name: string }) =>
-    step.name === 'Checkout workflow commit for first-install review guard');
   expect(baseCheckout.with.ref).toBe('${{ github.event.pull_request.base.sha || github.workflow_sha }}');
-  expect(workflowCheckout.with.ref).toBe('${{ github.workflow_sha }}');
-  expect(steps[guard].with.script).toContain('if (existsSync(baseGuard))');
-  expect(steps[guard].with.script).toContain('else if (!existsSync(baseManifest))');
-  expect(steps[guard].with.script).toContain('firstInstall = true');
-  expect(steps[guard].with.script).toContain("createHash('sha256')");
-  expect(steps[guard].with.script).toContain('workflowGuardSha256');
-  expect(steps[guard].with.script).toContain('workflowSource');
-  expect(steps[guard].with.script).toContain('workflowReview');
-  expect(steps[guard].with.script).toContain('missing from an established base installation');
+  expect(steps.some((step: { name: string }) =>
+    step.name.includes('workflow commit'))).toBe(false);
+  expect(steps[guard].with.script).toContain('!existsSync(baseGuard) || !existsSync(baseManifest)');
+  expect(steps[guard].with.script).toContain('First-install manual boundary');
+  expect(steps[guard].with.script).toContain('pathToFileURL(baseGuard)');
+  expect(steps[guard].with.script).not.toContain('github.workflow_sha');
+  expect(steps[guard].with.script).not.toContain('.squad-review-workflow');
+  expect(steps[guard].with.script).not.toContain('Squad-Review-Verdict:');
   const finalGate = review.steps.find((step: { name: string }) =>
     step.name === 'Enforce independent current-head verdict');
-  expect(finalGate.with.script).toContain('if (existsSync(baseGuard))');
-  expect(finalGate.with.script).toContain('else if (!existsSync(baseManifest))');
-  expect(finalGate.with.script).toContain('firstInstall = true');
-  expect(finalGate.with.script).toContain("createHash('sha256')");
-  expect(finalGate.with.script).toContain('workflowGuardSha256');
-  expect(finalGate.with.script).toContain('workflowSource');
-  expect(finalGate.with.script).toContain('missing from an established base installation');
+  expect(finalGate.with.script).toContain('!existsSync(baseGuard) || !existsSync(baseManifest)');
+  expect(finalGate.with.script).toContain('First-install manual boundary');
+  expect(finalGate.with.script).toContain('pathToFileURL(baseGuard)');
+  expect(finalGate.with.script).not.toContain('github.workflow_sha');
+  expect(finalGate.with.script).not.toContain('.squad-review-workflow');
+  expect(finalGate.with.script).not.toContain('Squad-Review-Verdict:');
   for (const step of review.steps) expect(step['continue-on-error']).toBeUndefined();
   expect(review['continue-on-error']).toBeUndefined();
 }
@@ -213,9 +207,8 @@ async function executeCompiledGuardLoader(
   {
     baseGuard,
     baseManifest = false,
-    workflowGuard,
     head = 'a'.repeat(40),
-  }: { baseGuard?: string; baseManifest?: boolean; workflowGuard: string; head?: string },
+  }: { baseGuard?: string; baseManifest?: boolean; head?: string },
 ): Promise<string> {
   const workspace = mkdtempSync(resolve(ROOT, '.squad-review-loader-'));
   compileWorkspaces.push(workspace);
@@ -235,14 +228,6 @@ async function executeCompiledGuardLoader(
     mkdirSync(dirname(path), { recursive: true });
     writeFileSync(path, '{}\n');
   }
-  const workflowPath = resolve(workspace, '.squad-review-workflow', guardPath);
-  mkdirSync(dirname(workflowPath), { recursive: true });
-  writeFileSync(workflowPath, workflowGuard);
-  writeFileSync(
-    resolve(workspace, '.squad-review-workflow', '.github/workflows/squad-review.md'),
-    `---\nsource: bradygaster/squad/workflows/package/squad-review.md@${head}\n---\n`,
-  );
-
   const previousWorkspace = process.env.GITHUB_WORKSPACE;
   const previousOutput = process.env.SQUAD_TEST_GUARD_OUTPUT;
   const previousHead = process.env.SQUAD_REVIEW_HEAD;
@@ -255,7 +240,7 @@ async function executeCompiledGuardLoader(
       import { createRequire } from 'node:module';
       const require = createRequire(import.meta.url);
       const github = { request: async () => ({ data: {} }) };
-      ${script.replaceAll('${{ github.workflow_sha }}', head)}
+      ${script}
     `);
     await import(`${pathToFileURL(runner).href}?run=${Date.now()}`);
     return readFileSync(output, 'utf8');
@@ -267,197 +252,6 @@ async function executeCompiledGuardLoader(
     if (previousHead === undefined) delete process.env.SQUAD_REVIEW_HEAD;
     else process.env.SQUAD_REVIEW_HEAD = previousHead;
   }
-}
-
-function executeCompiledSafeOutputContract(
-  script: string,
-  scenario:
-    | 'clean-install'
-    | 'clean-arbitrary'
-    | 'established-missing'
-    | 'configured'
-    | 'changed-source'
-    | 'changed-lock'
-    | 'canonical-mismatch'
-    | 'source-fetch-failure',
-): { status: number | null; diagnostics: string; output?: string } {
-  const workspace = mkdtempSync(resolve(ROOT, '.squad-review-live-contract-'));
-  compileWorkspaces.push(workspace);
-  const workflowShared = resolve(
-    workspace,
-    '.squad-review-workflow',
-    '.github/workflows/shared',
-  );
-  mkdirSync(dirname(workflowShared), { recursive: true });
-  cpSync(resolve(ROOT, 'workflows/shared'), workflowShared, { recursive: true });
-  const workflowReview = resolve(
-    workspace,
-    '.squad-review-workflow',
-    '.github/workflows/squad-review.md',
-  );
-  mkdirSync(dirname(workflowReview), { recursive: true });
-  writeFileSync(
-    workflowReview,
-    LIVE_INSTALL.consumerFiles.get('.github/workflows/squad-review.md')!,
-  );
-  if (scenario === 'established-missing' || scenario === 'configured') {
-    const baseShared = resolve(workspace, '.squad-review-base', '.github/workflows/shared');
-    mkdirSync(dirname(baseShared), { recursive: true });
-    cpSync(resolve(ROOT, 'workflows/shared'), baseShared, { recursive: true });
-    const manifestPath = resolve(
-      workspace,
-      '.squad-review-base',
-      '.github/aw/squad-workflows.manifest.json',
-    );
-    mkdirSync(dirname(manifestPath), { recursive: true });
-    writeFileSync(manifestPath, '{}\n');
-  }
-
-  const head = 'a'.repeat(40);
-  const base = 'b'.repeat(40);
-  const consumerFiles = new Map([...LIVE_INSTALL.consumerFiles].map(
-    ([path, content]) => [path, Buffer.from(content)],
-  ));
-  const canonicalFiles = new Map([...LIVE_INSTALL.canonicalFiles].map(
-    ([path, content]) => [path, Buffer.from(content)],
-  ));
-  if (scenario === 'changed-source') {
-    consumerFiles.set(
-      '.github/workflows/squad.md',
-      Buffer.concat([consumerFiles.get('.github/workflows/squad.md')!, Buffer.from('\nchanged\n')]),
-    );
-  }
-  if (scenario === 'changed-lock') {
-    consumerFiles.set(
-      '.github/workflows/squad.lock.yml',
-      Buffer.concat([
-        consumerFiles.get('.github/workflows/squad.lock.yml')!,
-        Buffer.from('\nchanged\n'),
-      ]),
-    );
-  }
-  if (scenario === 'canonical-mismatch') {
-    canonicalFiles.set(
-      'workflows/package/squad.md',
-      Buffer.concat([canonicalFiles.get('workflows/package/squad.md')!, Buffer.from('\nchanged\n')]),
-    );
-  }
-  const encodedConsumerFiles = Object.fromEntries([...consumerFiles].map(
-    ([path, content]) => [path, content.toString('base64')],
-  ));
-  const encodedCanonicalFiles = Object.fromEntries([...canonicalFiles].map(
-    ([path, content]) => [path, content.toString('base64')],
-  ));
-  const outputPath = resolve(workspace, 'agent-output.json');
-  writeFileSync(outputPath, JSON.stringify({ items: [{
-    type: 'submit_pull_request_review',
-    event: 'COMMENT',
-    body: 'No blocking installation findings.',
-  }] }));
-  const runner = resolve(workspace, 'runner.mjs');
-  const compiledScript = script.replaceAll('${{ github.workflow_sha }}', head);
-  writeFileSync(runner, `
-    import { createRequire } from 'node:module';
-    const require = createRequire(import.meta.url);
-    const head = ${JSON.stringify(head)};
-    const base = ${JSON.stringify(base)};
-    const scenario = ${JSON.stringify(scenario)};
-    const consumerFiles = ${JSON.stringify(encodedConsumerFiles)};
-    const canonicalFiles = ${JSON.stringify(encodedCanonicalFiles)};
-    const provenance = ${JSON.stringify(LIVE_INSTALL.provenance)};
-    const encode = content => {
-      if (!Buffer.isBuffer(content)) content = Buffer.from(JSON.stringify(content));
-      return {
-        type: 'file',
-        encoding: 'base64',
-        size: content.length,
-        content: content.toString('base64'),
-      };
-    };
-    const attribution = {
-      schema: 'squad-review-author/v1',
-      repository: 'squad/example',
-      issue: 9,
-      author_agent: 'implementer',
-      reviewer_agent: 'reviewer',
-    };
-    const registry = {
-      schema: 'squad-agent-provenance/v1',
-      schema_version: 1,
-      agents: {
-        implementer: { persistent_name: 'implementer', status: 'active' },
-        reviewer: { persistent_name: 'reviewer', status: 'active' },
-      },
-    };
-    const github = {
-      request: async (request, fields) => {
-        const route = request.replace(/^GET \\//, '');
-        if (route.endsWith('/pulls/42')) return { data: {
-          number: 42,
-          state: 'open',
-          merged: false,
-          body: '',
-          head: { sha: head, ref: 'install-squad', repo: { full_name: 'squad/example' } },
-          base: { sha: base, ref: 'dev', repo: { full_name: 'squad/example' } },
-        } };
-        if (route.endsWith('/contents/.squad-review.json')) {
-          if (scenario === 'configured') return { data: encode(attribution) };
-          throw Object.assign(new Error('Not Found'), { status: 404 });
-        }
-        if (route.endsWith('/contents/.squad/casting/registry.json')) {
-          return { data: encode(registry) };
-        }
-        if (route.endsWith('/contents/.github/aw/squad-workflows.manifest.json')) {
-          return { data: encode(Buffer.from(consumerFiles[
-            '.github/aw/squad-workflows.manifest.json'
-          ], 'base64')) };
-        }
-        if (route.endsWith('/contents/.github/aw/packages')) {
-          if (scenario === 'clean-arbitrary') return { data: [] };
-          return { data: [{
-            type: 'file',
-            name: 'bradygaster-squad-workflows-3632054824e8.json',
-          }] };
-        }
-        if (route.includes('/contents/.github/aw/packages/')) {
-          return { data: encode(provenance) };
-        }
-        const marker = '/contents/';
-        const path = route.slice(route.indexOf(marker) + marker.length);
-        const sourceRepository = route.startsWith('repos/bradygaster/squad/');
-        if (sourceRepository && scenario === 'source-fetch-failure' &&
-            path === 'workflows/package/squad.md') {
-          throw Object.assign(new Error('source fetch forbidden'), { status: 403 });
-        }
-        const files = sourceRepository ? canonicalFiles : consumerFiles;
-        if (files[path]) return { data: encode(Buffer.from(files[path], 'base64')) };
-        if (route.endsWith('/reviews')) return { data: [] };
-        throw new Error('Unexpected API route: ' + route + ' ' + JSON.stringify(fields));
-      },
-    };
-    ${compiledScript}
-  `);
-  const result = spawnSync(process.execPath, [runner], {
-    cwd: workspace,
-    encoding: 'utf8',
-    env: {
-      ...process.env,
-      GITHUB_WORKSPACE: workspace,
-      GITHUB_EVENT_NAME: 'pull_request',
-      GITHUB_REPOSITORY: 'squad/example',
-      GITHUB_RUN_ID: '17',
-      GITHUB_RUN_ATTEMPT: '1',
-      GH_AW_AGENT_OUTPUT: outputPath,
-      SQUAD_REVIEW_PR: '42',
-      SQUAD_REVIEW_HEAD: head,
-      GH_AW_WORKFLOW_SOURCE: `bradygaster/squad/workflows/package/squad-review.md@${LIVE_INSTALL_REVISION}`,
-    },
-  });
-  return {
-    status: result.status,
-    diagnostics: `${result.stdout}\n${result.stderr}`,
-    output: result.status === 0 ? readFileSync(outputPath, 'utf8') : undefined,
-  };
 }
 
 describe('gh-aw enforcing Squad reviewer', () => {
@@ -645,19 +439,19 @@ describe('gh-aw enforcing Squad reviewer', () => {
     expect(lock).toContain('GH_AW_HEAD_SHA: ${{ github.event.pull_request.head.sha }}');
   }, 30000);
 
-  it('executes the compiled first-install fallback without weakening established base control', async () => {
+  it('loads review authority only from the base and makes first install a manual boundary', async () => {
     const { lock } = compileReviewer();
     const stub = (source: string) => `
       import { writeFileSync } from 'node:fs';
-      export async function enforceReviewOutputs(env, get, options) {
+      export async function enforceReviewOutputs(env) {
         writeFileSync(process.env.SQUAD_TEST_GUARD_OUTPUT,
           JSON.stringify({ source: ${JSON.stringify(source)}, operation: 'safe outputs',
-            head: env.SQUAD_REVIEW_HEAD, options }));
+            head: env.SQUAD_REVIEW_HEAD }));
       }
-      export async function assertClearingReview(env, get, options) {
+      export async function assertClearingReview(env) {
         writeFileSync(process.env.SQUAD_TEST_GUARD_OUTPUT,
           JSON.stringify({ source: ${JSON.stringify(source)}, operation: 'final verdict',
-            head: env.SQUAD_REVIEW_HEAD, options }));
+            head: env.SQUAD_REVIEW_HEAD }));
       }
     `;
 
@@ -665,113 +459,42 @@ describe('gh-aw enforcing Squad reviewer', () => {
       const head = name === 'safe outputs'
         ? 'edd6fbf0f84334ff086ed2bc8bbfed5503fdd56f'
         : '9a898b5182ca432b62bef26dbf1f9022dd1d256b';
-      const workflowGuard = stub('workflow');
-      const workflowGuardSha256 = createHash('sha256').update(workflowGuard).digest('hex');
       await expect(executeCompiledGuardLoader(script, {
-        workflowGuard,
         head,
-      })).resolves.toBe(JSON.stringify({
-        source: 'workflow',
-        operation: name,
-        head,
-        options: {
-          firstInstall: true,
-          workflowSha: head,
-          workflowGuardSha256,
-          workflowSource: `bradygaster/squad/workflows/package/squad-review.md@${head}`,
-        },
-      }));
+      })).rejects.toThrow('First-install manual boundary');
 
       await expect(executeCompiledGuardLoader(script, {
         baseGuard: stub('base'),
         baseManifest: true,
-        workflowGuard,
         head,
       })).resolves.toBe(JSON.stringify({
         source: 'base',
         operation: name,
         head,
-        options: { firstInstall: false, workflowSha: head },
       }));
 
       await expect(executeCompiledGuardLoader(script, {
         baseManifest: true,
-        workflowGuard,
         head,
-      })).rejects.toThrow(
-        'Squad Review guard is missing from an established base installation. Refusing workflow-source fallback.',
-      );
+      })).rejects.toThrow('First-install manual boundary');
 
       await expect(executeCompiledGuardLoader(script, {
         baseGuard: 'this is not valid JavaScript',
         baseManifest: true,
-        workflowGuard,
         head,
       })).rejects.toThrow();
     }
   }, 30000);
 
-  it('executes the live compiled identity contract for install and established reviews', () => {
+  it('does not embed a PR-controlled guard, verdict, or trusted fallback in emitted loaders', () => {
     const { lock } = compileReviewer();
-    const safeOutputScript = compiledGuardScripts(lock)
-      .find(candidate => candidate.name === 'safe outputs')!.script;
-
-    const cleanInstall = executeCompiledSafeOutputContract(safeOutputScript, 'clean-install');
-    expect(cleanInstall.status, cleanInstall.diagnostics).toBe(0);
-    const cleanOutput = JSON.parse(cleanInstall.output!);
-    expect(cleanOutput.items[0].body).toContain(
-      '"author_agent":"@squad/bootstrap-installation"',
-    );
-    expect(cleanOutput.items[0].body).toContain(
-      '"reviewer_agent":"@squad/bootstrap-review-workflow"',
-    );
-
-    const configured = executeCompiledSafeOutputContract(safeOutputScript, 'configured');
-    expect(configured.status, configured.diagnostics).toBe(0);
-    const configuredOutput = JSON.parse(configured.output!);
-    expect(configuredOutput.items[0].body).toContain('"author_agent":"implementer"');
-    expect(configuredOutput.items[0].body).toContain('"reviewer_agent":"reviewer"');
-
-    const establishedMissing = executeCompiledSafeOutputContract(
-      safeOutputScript,
-      'established-missing',
-    );
-    expect(establishedMissing.status).not.toBe(0);
-    expect(establishedMissing.diagnostics).toContain('Not Found');
-
-    const arbitraryClean = executeCompiledSafeOutputContract(safeOutputScript, 'clean-arbitrary');
-    expect(arbitraryClean.status).not.toBe(0);
-    expect(arbitraryClean.diagnostics).toContain(
-      'missing or duplicate first-install package provenance',
-    );
-
-    const changedSource = executeCompiledSafeOutputContract(safeOutputScript, 'changed-source');
-    expect(changedSource.status).not.toBe(0);
-    expect(changedSource.diagnostics).toContain(
-      'installed bytes do not match ownership for .github/workflows/squad.md',
-    );
-
-    const changedLock = executeCompiledSafeOutputContract(safeOutputScript, 'changed-lock');
-    expect(changedLock.status).not.toBe(0);
-    expect(changedLock.diagnostics).toContain(
-      'installed compiled lock mismatch for .github/workflows/squad.lock.yml',
-    );
-
-    const canonicalMismatch = executeCompiledSafeOutputContract(
-      safeOutputScript,
-      'canonical-mismatch',
-    );
-    expect(canonicalMismatch.status).not.toBe(0);
-    expect(canonicalMismatch.diagnostics).toContain(
-      'immutable package source digest mismatch for workflows/package/squad.md',
-    );
-
-    const sourceFetchFailure = executeCompiledSafeOutputContract(
-      safeOutputScript,
-      'source-fetch-failure',
-    );
-    expect(sourceFetchFailure.status).not.toBe(0);
-    expect(sourceFetchFailure.diagnostics).toContain('source fetch forbidden');
+    for (const { script } of compiledGuardScripts(lock)) {
+      expect(script).toContain('pathToFileURL(baseGuard)');
+      expect(script).not.toContain('.squad-review-workflow');
+      expect(script).not.toContain('workflowGuard');
+      expect(script).not.toContain('Squad-Review-Verdict:');
+      expect(script).not.toContain('@squad/bootstrap-installation');
+    }
   }, 30000);
 
   it('kills mutations of every important authority and provenance gate', () => {
@@ -808,6 +531,8 @@ describe('gh-aw enforcing Squad reviewer', () => {
       REVIEWER.replace('await guard.enforceReviewOutputs', 'void guard.enforceReviewOutputs'),
       REVIEWER.replace('await guard.assertClearingReview', 'void guard.assertClearingReview'),
       REVIEWER.replace("&& 'Squad Review / review'", "&& 'Other check'"),
+      REVIEWER.replace('pathToFileURL(baseGuard)', "pathToFileURL('.squad-review-workflow/guard.mjs')"),
+      REVIEWER.replace('No trusted Squad verdict was emitted.', 'Squad-Review-Verdict: trusted'),
       REVIEWER.replace('    if: always()\n', '    if: success()\n'),
       REVIEWER.replace('    needs: [agent, safe_outputs]', '    needs: [agent]'),
     ];

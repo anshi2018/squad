@@ -54,12 +54,6 @@ safe-outputs:
         ref: ${{ github.event.pull_request.base.sha || github.workflow_sha }}
         persist-credentials: false
         path: .squad-review-base
-    - name: Checkout workflow commit for first-install review guard
-      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      with:
-        ref: ${{ github.workflow_sha }}
-        persist-credentials: false
-        path: .squad-review-workflow
     - name: Bind review output to committed agent identities and current head
       uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
       env:
@@ -68,46 +62,20 @@ safe-outputs:
         SQUAD_REVIEW_HEAD: ${{ github.event.pull_request.head.sha || github.event.inputs.expected_head_sha }}
       with:
         script: |
-          const { existsSync, readFileSync } = require('node:fs');
-          const { createHash } = require('node:crypto');
+          const { existsSync } = require('node:fs');
           const { pathToFileURL } = require('node:url');
           const baseGuard =
             `${process.env.GITHUB_WORKSPACE}/.squad-review-base/.github/workflows/shared/squad-review-guard.mjs`;
           const baseManifest =
             `${process.env.GITHUB_WORKSPACE}/.squad-review-base/.github/aw/squad-workflows.manifest.json`;
-          const workflowGuard =
-            `${process.env.GITHUB_WORKSPACE}/.squad-review-workflow/.github/workflows/shared/squad-review-guard.mjs`;
-          const workflowReview =
-            `${process.env.GITHUB_WORKSPACE}/.squad-review-workflow/.github/workflows/squad-review.md`;
-          let guardPath;
-          let firstInstall = false;
-          if (existsSync(baseGuard)) {
-            guardPath = baseGuard;
-          } else if (!existsSync(baseManifest)) {
-            guardPath = workflowGuard;
-            firstInstall = true;
-          } else {
+          if (!existsSync(baseGuard) || !existsSync(baseManifest)) {
             throw new Error(
-              'Squad Review guard is missing from an established base installation. Refusing workflow-source fallback.'
+              'First-install manual boundary: the PR base does not contain the trusted Squad review guard and manifest. No trusted Squad verdict was emitted. Merge only with explicit human approval; trusted review begins on the post-merge bootstrap PR.'
             );
           }
-          const workflowGuardSha256 = firstInstall
-            ? createHash('sha256').update(readFileSync(workflowGuard)).digest('hex')
-            : undefined;
-          const workflowSource = firstInstall
-            ? readFileSync(workflowReview, 'utf8').match(
-              /^source:\s+(bradygaster\/squad\/workflows\/package\/squad-review\.md@[0-9a-f]{40})$/m
-            )?.[1]
-            : undefined;
-          const guard = await import(pathToFileURL(guardPath).href);
+          const guard = await import(pathToFileURL(baseGuard).href);
           await guard.enforceReviewOutputs(process.env,
-            async (route, fields) => (await github.request(`GET /${route}`, fields)).data,
-            {
-              firstInstall,
-              workflowSha: '${{ github.workflow_sha }}',
-              workflowGuardSha256,
-              workflowSource,
-            });
+            async (route, fields) => (await github.request(`GET /${route}`, fields)).data);
   add-comment:
     max: 1
     target: "${{ github.event.inputs.issue_number || github.event.pull_request.number }}"
@@ -149,13 +117,6 @@ jobs:
           ref: ${{ github.event.pull_request.base.sha }}
           persist-credentials: false
           path: .squad-review-base
-      - name: Checkout workflow commit for first-install final verdict gate
-        if: github.event_name == 'pull_request'
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ github.workflow_sha }}
-          persist-credentials: false
-          path: .squad-review-workflow
       - name: Enforce independent current-head verdict
         if: github.event_name == 'pull_request'
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
@@ -164,46 +125,20 @@ jobs:
           SQUAD_REVIEW_HEAD: ${{ github.event.pull_request.head.sha }}
         with:
           script: |
-            const { existsSync, readFileSync } = require('node:fs');
-            const { createHash } = require('node:crypto');
+            const { existsSync } = require('node:fs');
             const { pathToFileURL } = require('node:url');
             const baseGuard =
               `${process.env.GITHUB_WORKSPACE}/.squad-review-base/.github/workflows/shared/squad-review-guard.mjs`;
             const baseManifest =
               `${process.env.GITHUB_WORKSPACE}/.squad-review-base/.github/aw/squad-workflows.manifest.json`;
-            const workflowGuard =
-              `${process.env.GITHUB_WORKSPACE}/.squad-review-workflow/.github/workflows/shared/squad-review-guard.mjs`;
-            const workflowReview =
-              `${process.env.GITHUB_WORKSPACE}/.squad-review-workflow/.github/workflows/squad-review.md`;
-            let guardPath;
-            let firstInstall = false;
-            if (existsSync(baseGuard)) {
-              guardPath = baseGuard;
-            } else if (!existsSync(baseManifest)) {
-              guardPath = workflowGuard;
-              firstInstall = true;
-            } else {
+            if (!existsSync(baseGuard) || !existsSync(baseManifest)) {
               throw new Error(
-                'Squad Review guard is missing from an established base installation. Refusing workflow-source fallback.'
+                'First-install manual boundary: the PR base does not contain the trusted Squad review guard and manifest. No trusted Squad verdict was emitted. Merge only with explicit human approval; trusted review begins on the post-merge bootstrap PR.'
               );
             }
-            const workflowGuardSha256 = firstInstall
-              ? createHash('sha256').update(readFileSync(workflowGuard)).digest('hex')
-              : undefined;
-            const workflowSource = firstInstall
-              ? readFileSync(workflowReview, 'utf8').match(
-                /^source:\s+(bradygaster\/squad\/workflows\/package\/squad-review\.md@[0-9a-f]{40})$/m
-              )?.[1]
-              : undefined;
-            const guard = await import(pathToFileURL(guardPath).href);
+            const guard = await import(pathToFileURL(baseGuard).href);
             await guard.assertClearingReview(process.env,
-              async (route, fields) => (await github.request(`GET /${route}`, fields)).data,
-              {
-                firstInstall,
-                workflowSha: '${{ github.workflow_sha }}',
-                workflowGuardSha256,
-                workflowSource,
-              });
+              async (route, fields) => (await github.request(`GET /${route}`, fields)).data);
 ---
 
 # Squad Review
@@ -243,24 +178,23 @@ The deterministic output guard and final job repeat these checks. A refusal,
 missing verdict, stale head, or malformed provenance cannot clear the required
 `Squad Review / review` check.
 
-A clean package-install PR is the only exception to the attribution-file
-requirement. The deterministic guard recognizes it only when the PR base has
-neither the installed review guard nor `.github/aw/squad-workflows.manifest.json`,
-the guard is loaded from the immutable workflow commit, and the exact PR head
-contains a valid `bradygaster/squad/workflows` installation manifest and package
-provenance record. Every installed workflow source, compiled lock, runtime
-resource, skill, and manifest byte is fetched at the exact PR head and checked
-against canonical content or normalized lock digests fetched from the immutable
-package revision. The source revision, exact 8/17/1 topology, ownership shape,
-and executing guard digest must agree. In that case only,
-absent `.squad-review.json` binds the reserved synthetic attribution
-`author_agent: @squad/bootstrap-installation` and
-`reviewer_agent: @squad/bootstrap-review-workflow`. These values are outside
-the configured stable-agent ID grammar and identify workflow roles, not a
-human or committed Squad agent. A present malformed attribution,
-an established installation missing attribution, or any non-404 read failure
-remains a refusal. Never infer this exception from the PR title, body, branch,
-author, or other mutable prose.
+The workflow-installation PR is an explicit human trust boundary. Its base does
+not contain the Squad guard or manifest, so no code, job name, check result, or
+review record emitted by that PR is a trusted Squad verdict. The loader refuses
+workflow-source fallback and emits no `Squad-Review-Verdict:` record. Merge the
+installation only through explicit human review of the generated package.
+
+Trusted review starts on the automatic post-merge Cast PR. The guard is then
+loaded only from the exact PR base commit, where the installed manifest also
+exists. That base-controlled guard permits missing `.squad-review.json` only
+for the exact `squad/bootstrap-cast` PR created by the base-controlled bootstrap
+workflow. It verifies the GitHub Actions bot author, canonical title and branch,
+matching provenance in the PR body and a durable bot-authored PR comment, exact
+base/head SHAs, and the referenced default-branch `squad-bootstrap.lock.yml`
+push run. It binds the reserved roles
+`@squad/base-controlled-bootstrap` and `@squad/base-controlled-review`; the
+clearing gate additionally requires that bootstrap run to finish successfully.
+All other missing, malformed, or non-404 attribution evidence is refused.
 
 ## Provenance decision tree
 

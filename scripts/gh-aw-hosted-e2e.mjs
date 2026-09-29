@@ -564,6 +564,64 @@ export function waitForBootstrapOutputs(
   throw new Error('Timed out waiting for the draft Cast PR and bootstrap research issue.');
 }
 
+function waitForBaseControlledReviewCanary(target, castPr, evidence) {
+  const deadline = Date.now() + 20 * 60 * 1000;
+  while (Date.now() < deadline) {
+    const checks = ghJson([
+      'api',
+      '-H', 'Accept: application/vnd.github+json',
+      `repos/${target}/commits/${castPr.headSha}/check-runs`,
+      '--jq', '{check_runs:[.check_runs[] | {id,name,status,conclusion,app:{slug:.app.slug}}]}',
+    ]).check_runs;
+    const trustedChecks = checks.filter((check) =>
+      check.name === 'Squad Review / review' && check.app?.slug === 'github-actions');
+    if (trustedChecks.length > 1) {
+      throw new Error(`Expected one base-controlled Squad Review canary check; found ${trustedChecks.length}.`);
+    }
+    const reviews = ghJson([
+      'api',
+      `repos/${target}/pulls/${castPr.number}/reviews?per_page=100`,
+    ]);
+    const verdicts = reviews.filter((review) =>
+      review.user?.login === ACTIONS_BOT_LOGIN &&
+      review.commit_id === castPr.headSha &&
+      String(review.body ?? '').includes('Squad-Review-Verdict:'));
+    if (verdicts.length > 1) {
+      throw new Error(`Expected one base-controlled Squad Review canary verdict; found ${verdicts.length}.`);
+    }
+    if (trustedChecks.length === 1 && trustedChecks[0].status === 'completed') {
+      const check = trustedChecks[0];
+      if (check.conclusion !== 'success') {
+        throw new Error(`Base-controlled Squad Review canary failed for ${castPr.url}.`);
+      }
+      if (verdicts.length !== 1) {
+        throw new Error('Successful Squad Review canary check is missing its exact-head verdict.');
+      }
+      const marker = String(verdicts[0].body).match(/^Squad-Review-Verdict: (\{[^\r\n]+\})$/m);
+      if (!marker) throw new Error('Squad Review canary verdict marker is malformed.');
+      const verdict = JSON.parse(marker[1]);
+      if (verdict.schema !== 'squad-review-verdict/v1'
+        || verdict.repository !== target
+        || verdict.pull_request !== castPr.number
+        || verdict.head_sha !== castPr.headSha
+        || verdict.author_agent !== '@squad/base-controlled-bootstrap'
+        || verdict.reviewer_agent !== '@squad/base-controlled-review'
+        || verdict.result !== 'COMMENT') {
+        throw new Error('Squad Review canary verdict is not bound to the base-controlled bootstrap activation.');
+      }
+      writeJson(resolve(evidence, 'base-controlled-review-canary.json'), {
+        pull_request: castPr,
+        check,
+        review: verdicts[0],
+        verdict,
+      });
+      return { check, verdict };
+    }
+    sleep(10_000);
+  }
+  throw new Error('Timed out waiting for the base-controlled Squad Review activation canary.');
+}
+
 function createAndMergePr({
   cwd,
   target,
@@ -732,6 +790,11 @@ function hosted(args, repositoryRoot) {
       installation,
       installRun,
     );
+    const reviewCanary = waitForBaseControlledReviewCanary(
+      targetState.target,
+      outputs.castPr,
+      evidence,
+    );
 
     runChild('git', ['fetch', 'origin', targetState.info.default_branch], { cwd: checkout });
     const probeBranch = `squad-e2e/probe-${process.env.GITHUB_RUN_ID ?? sourceSha.slice(0, 12)}`;
@@ -785,6 +848,8 @@ function hosted(args, repositoryRoot) {
       source_sha: sourceSha,
       installation_pr: installation.number,
       installation_run: installRun.url,
+      review_canary_pr: outputs.castPr.number,
+      review_canary_check: reviewCanary.check.id,
       probe_pr: probeMerge.number,
       probe_run: probeRun.url,
       generated_cast_pr: outputs.castPr.url,

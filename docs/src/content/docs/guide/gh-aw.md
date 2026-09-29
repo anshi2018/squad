@@ -103,6 +103,22 @@ skill as one update unit. For an upgrade, resolve or select one reviewed commit
 and reinstall that same package as described in
 [Upgrading the workflows](#upgrading-the-workflows).
 
+The bootstrap installation PR is an explicit human trust boundary. Because its
+base branch does not yet contain the Squad review guard and manifest, no job,
+check name, review comment, or workflow code introduced by that PR is accepted
+as a trusted Squad verdict. The canonical workflow reports
+`First-install manual boundary`, emits no `Squad-Review-Verdict:` record, and
+requires a human to review the verifier/compile evidence before merging.
+
+After merge, the default-branch bootstrap workflow opens the draft Cast PR.
+That PR is the activation canary: `Squad Review / review` must succeed using the
+guard and manifest checked out from the Cast PR's exact base commit. The guard
+also requires matching exact-head provenance in the PR body and a durable
+GitHub Actions bot comment, so editable PR prose cannot rebind an old bootstrap
+run to a changed branch head. Only after that base-controlled canary succeeds
+should the Cast/bootstrap lifecycle be treated as trusted. Do not enable the
+required check in a ruleset before this post-install canary has been observed.
+
 Step 2 deliberately checks Issues before creating the bootstrap branch or
 installing any workflow. Squad commands are issue comments, and the merged
 bootstrap creates a research/proposals issue; without Issues, the installation
@@ -426,8 +442,9 @@ Use this checklist for the initial bootstrap and after any workflow update:
 | Repository readiness | Confirm `.has_issues` is `true`; if it is `false`, enable it before installing workflows | GitHub Issues are available for `/squad` comments and the bootstrap research/proposals issue; insufficient administration permission stops the install before a bootstrap PR is created |
 | Install | Run the eight-workflow `gh aw add` command on a bootstrap branch | All eight `.md`/`.lock.yml` pairs exist, with shared imports, `.github/aw/`, installed skills, and `.gitattributes` included in the diff |
 | Compile | Review any first-install safe-update report, approve only the documented entries, then run `gh aw compile --strict` without approval | All eight workflows succeed, only documented warnings remain, and all sixteen source/lock files exist |
-| Bootstrap review | Open the PR, request `@copilot`, wait for checks, and merge only after human approval | The default branch receives the complete generated install as one human-reviewable change |
-| Automatic bootstrap | Merge the workflow-installation PR | The dedicated workflow creates one draft Cast PR and one linked research-proposals issue from the same validated payload |
+| Bootstrap review | Open the installation PR, request `@copilot`, inspect verifier/compile evidence, and merge only after human approval | The run reports the explicit first-install manual boundary; no `Squad-Review-Verdict:` record or PR-controlled check is treated as trusted |
+| Activation canary | Merge the workflow-installation PR and inspect the automatically opened draft Cast PR | `Squad Review / review` succeeds with reserved bootstrap roles only after loading the guard and manifest from the exact base commit and validating the default-branch bootstrap run |
+| Automatic bootstrap | Continue only after the Cast PR activation canary succeeds | The dedicated workflow's draft Cast PR and linked research-proposals issue share the same validated base-controlled provenance |
 | Cast persistence | Review the Cast PR before merging | The PR contains `.squad/casting/policy.json`, `registry.json`, and `history.json`, plus the team, routing, charters, Copilot agent, and `meet-the-squad.md` |
 | Research backlog | Follow the proposal issue through research, triage, plan, and activate | The journey ends with assignable implementation issues; `/squad implement` is used only on those generated tasks |
 | Cast checks | Open the linked Cast PR and inspect its checks; if application CI is `action_required`, approve that workflow run and wait for it to finish | Copilot review and the repository's normal build, test, lint, and security checks complete before merge |
@@ -1520,14 +1537,17 @@ Manual `/squad review` runs use `Squad Review / manual`; they cannot satisfy
 the PR check or clear relay evidence.
 
 Brady (or the consumer repository administrator) must install/merge the complete
-generated bundle and observe a successful PR-triggered check before changing
-rulesets. Record its actual check name and GitHub App ID from the check-runs
-API. Enable the required context with that observed App ID on `dev` **only after
-advisory soak** has met the evidence gate in #1734; promote to `main` after the
-agreed soak. This change does not modify repository rulesets and does not claim
-live soak evidence. Keep native human approving-review requirements enabled
-independently, with stale approvals dismissed. The bot's `COMMENT` is not a
-human approval. Do not use an unobserved guessed App ID or require the manual job.
+generated bundle through the explicit human installation boundary, then observe
+a successful PR-triggered check on the post-install draft Cast PR before
+changing rulesets. The installation PR itself is not evidence: its workflow and
+check name are controlled by that PR. Record the activation canary's actual
+check name and GitHub App ID from the check-runs API. Enable the required context
+with that observed App ID on `dev` **only after advisory soak** has met the
+evidence gate in #1734; promote to `main` after the agreed soak. This change
+does not modify repository rulesets and does not claim live soak evidence. Keep
+native human approving-review requirements enabled independently, with stale
+approvals dismissed. The bot's `COMMENT` is not a human approval. Do not use an
+unobserved guessed App ID or require the manual job.
 Because rulesets apply to all PRs, existing human/Copilot PRs must add committed
 attribution before enabling the requirement. Fork review is not supported by
 this workflow; do not relax it with `pull_request_target`.

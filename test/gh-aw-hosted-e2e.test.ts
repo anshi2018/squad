@@ -192,6 +192,9 @@ describe('Squad gh-aw hosted E2E controller', () => {
     expect(BOOTSTRAP_WORKFLOW).toContain('<!-- squad:bootstrap-provenance ${JSON.stringify(provenance)} -->');
     expect(BOOTSTRAP_WORKFLOW).toContain('pullRequestDetails.head.repo?.full_name !== provenance.repository');
     expect(BOOTSTRAP_WORKFLOW).toContain('body: `${provenanceMarker}\\n${prBodyWithoutProvenance}`');
+    expect(BOOTSTRAP_WORKFLOW).toContain(
+      'Base-controlled bootstrap provenance. Do not edit this comment.',
+    );
     expect(BOOTSTRAP_WORKFLOW).toContain('body: markedIssueBody');
   });
 
@@ -202,6 +205,18 @@ describe('Squad gh-aw hosted E2E controller', () => {
     expect(SCRIPT).toContain("['pr', 'close'");
     expect(SCRIPT).toContain("['api', '--method', 'DELETE'");
     expect(SCRIPT).toContain('rmSync(checkout, { recursive: true, force: true })');
+  });
+
+  it('requires a base-controlled review canary after the manual installation boundary', () => {
+    expect(SCRIPT).toContain('waitForBaseControlledReviewCanary');
+    expect(SCRIPT).toContain("check.name === 'Squad Review / review'");
+    expect(SCRIPT).toContain("check.app?.slug === 'github-actions'");
+    expect(SCRIPT).toContain("'@squad/base-controlled-bootstrap'");
+    expect(SCRIPT).toContain("'@squad/base-controlled-review'");
+    expect(SCRIPT).toContain("verdict.result !== 'COMMENT'");
+    expect(SCRIPT.indexOf('waitForBaseControlledReviewCanary')).toBeLessThan(
+      SCRIPT.indexOf("kind: 'squad-bootstrap-trigger-probe'"),
+    );
   });
 
   it('never executes candidate package or installed verifier with inherited credentials', () => {

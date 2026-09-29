@@ -482,6 +482,37 @@ safe-outputs:
                 pull_number: pullRequest.number,
                 body: `${provenanceMarker}\n${prBodyWithoutProvenance}`,
               });
+              const provenanceComments = (await github.paginate(
+                github.rest.issues.listComments,
+                {
+                  ...context.repo,
+                  issue_number: pullRequest.number,
+                  per_page: 100,
+                },
+              )).filter((comment) =>
+                String(comment.body || '').startsWith('<!-- squad:bootstrap-provenance '),
+              );
+              if (provenanceComments.length > 1) {
+                throw new Error('Ambiguous bot-authenticated bootstrap provenance comments.');
+              }
+              const provenanceCommentBody =
+                `${provenanceMarker}\nBase-controlled bootstrap provenance. Do not edit this comment.`;
+              if (provenanceComments.length === 1) {
+                if (provenanceComments[0].user?.login !== 'github-actions[bot]') {
+                  throw new Error('Bootstrap provenance comment is not owned by GitHub Actions.');
+                }
+                await github.rest.issues.updateComment({
+                  ...context.repo,
+                  comment_id: provenanceComments[0].id,
+                  body: provenanceCommentBody,
+                });
+              } else {
+                await github.rest.issues.createComment({
+                  ...context.repo,
+                  issue_number: pullRequest.number,
+                  body: provenanceCommentBody,
+                });
+              }
               const finalPayload = {
                 ...payload,
                 issue_body: payload.issue_body.replace('{{CAST_PR_URL}}', pullRequest.url),

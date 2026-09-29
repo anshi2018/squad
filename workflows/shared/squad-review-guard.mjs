@@ -1,32 +1,19 @@
 import { readFileSync, writeFileSync } from 'node:fs';
-import { createHash } from 'node:crypto';
 import { evaluateImplementDispatchInputs } from './squad-retro-provenance.mjs';
-import {
-  CONTRACT_DESTINATION,
-  CONTRACT_SOURCE,
-  MIN_GH_AW_VERSION,
-  OWNERSHIP_ENTRY_COUNT,
-  PACKAGE_NAME,
-  RUNTIME_TUPLES,
-  SKILL_TUPLES,
-  WORKFLOW_TUPLES,
-  normalizeCompiledLock,
-  validateContract,
-} from './squad-install-verifier.mjs';
 
 export const CHECK_NAME = 'Squad Review / review';
 export const VERDICT_PREFIX = 'Squad-Review-Verdict: ';
 export const OVERRIDE_PREFIX = 'Squad-Review-Override: ';
 const WORKFLOW = '.github/workflows/squad-review.lock.yml';
+const BOOTSTRAP_WORKFLOW = '.github/workflows/squad-bootstrap.lock.yml';
 const SHA = /^[0-9a-f]{40}$/;
 const ID = /^[a-z][a-z0-9-]*$/;
 const BOT = 'github-actions[bot]';
-const INSTALL_MANIFEST = CONTRACT_DESTINATION;
-const INSTALL_PACKAGES = '.github/aw/packages';
-const INSTALL_AUTHOR = '@squad/bootstrap-installation';
-const INSTALL_REVIEWER = '@squad/bootstrap-review-workflow';
-const INSTALL_SOURCE_REPOSITORY = 'bradygaster/squad';
-const SHA256 = /^[0-9a-f]{64}$/;
+const BOOTSTRAP_BRANCH = 'squad/bootstrap-cast';
+const BOOTSTRAP_TITLE = '[squad] Cast your Squad';
+const BOOTSTRAP_AUTHOR = '@squad/base-controlled-bootstrap';
+const BOOTSTRAP_REVIEWER = '@squad/base-controlled-review';
+const BOOTSTRAP_PREFIX = '<!-- squad:bootstrap-provenance ';
 
 function requireThat(condition, message) {
   if (!condition) throw new Error(`Squad review refused: ${message}`);
@@ -129,7 +116,6 @@ async function committedFileEvidence(
   requireThat(content.length === file.size, `truncated committed ${path}`);
   return {
     content,
-    sha256: createHash('sha256').update(content).digest('hex'),
   };
 }
 
@@ -146,173 +132,64 @@ async function committedJson(get, repository, path, ref, options) {
   return (await committedJsonEvidence(get, repository, path, ref, options))?.value;
 }
 
-function sha256(content) {
-  return createHash('sha256').update(content).digest('hex');
+function bootstrapRecord(body, label = 'bootstrap provenance') {
+  const lines = String(body ?? '').replace(/\r\n/g, '\n')
+    .split('\n').filter(line => line.startsWith(BOOTSTRAP_PREFIX));
+  requireThat(lines.length === 1 && lines[0].endsWith(' -->'),
+    `missing or duplicate base-controlled ${label}`);
+  const value = JSON.parse(lines[0].slice(BOOTSTRAP_PREFIX.length, -4));
+  requireThat(exactKeys(
+    value,
+    ['schema', 'repository', 'run_id', 'install_sha', 'cast_sha'],
+  ) && value.schema === 1, `malformed base-controlled ${label}`);
+  return value;
 }
 
-function exactObjectKeys(value, expected, label) {
-  requireThat(exactKeys(value, expected), `invalid ${label} shape`);
-}
-
-function expectedOwnership(manifest) {
-  return [
-    ...manifest.workflows.map(({ source, destination }) => ({ source, destination })),
-    ...manifest.shared_runtime.map(({ source, package_destination: destination }) => ({
-      source,
-      destination,
-    })),
-    { source: CONTRACT_SOURCE, destination: CONTRACT_DESTINATION },
-  ].sort((left, right) => left.destination.localeCompare(right.destination));
-}
-
-function workflowSourceBytes(content, source, revision) {
-  const text = content.toString('utf8');
-  const bindings = [
-    `source: ${PACKAGE_NAME}@${revision}`,
-    `source: bradygaster/squad/${source}@${revision}`,
-  ];
-  let canonical = text;
-  let matches = 0;
-  for (const binding of bindings) {
-    const marker = `\n${binding}\n---\n`;
-    if (canonical.includes(marker)) {
-      canonical = canonical.replace(marker, '\n---\n');
-      matches++;
-    }
-  }
-  requireThat(matches === 1, `installed workflow source binding mismatch for ${source}`);
-  return Buffer.from(canonical);
-}
-
-async function validateFirstInstallPackage(get, repository, ref, workflowSource, guardSha256) {
-  const entries = await get(`repos/${repository}/contents/${INSTALL_PACKAGES}`, { ref });
-  requireThat(Array.isArray(entries) && entries.length <= 64,
-    'unreadable committed first-install package provenance');
-  const packages = entries.filter(entry =>
-    entry?.type === 'file' &&
-    /^bradygaster-squad-workflows-[0-9a-f]{12}\.json$/.test(entry.name ?? ''));
-  requireThat(packages.length === 1, 'missing or duplicate first-install package provenance');
-  const provenance = await committedJson(
-    get,
-    repository,
-    `${INSTALL_PACKAGES}/${packages[0].name}`,
-    ref,
+async function validateBootstrapAttribution(get, repository, pr, requireRunSuccess) {
+  const provenance = bootstrapRecord(pr.body, 'bootstrap PR provenance');
+  const comments = await list(get, `repos/${repository}/issues/${pr.number}/comments`);
+  const provenanceComments = comments.filter(comment =>
+    comment.user?.login === BOT &&
+    comment.user?.type === 'Bot' &&
+    String(comment.body ?? '').startsWith(BOOTSTRAP_PREFIX));
+  requireThat(provenanceComments.length === 1,
+    'missing or duplicate bot-authenticated bootstrap provenance comment');
+  const commentProvenance = bootstrapRecord(
+    provenanceComments[0].body,
+    'bootstrap comment provenance',
   );
-  const revision = provenance?.resolvedCommit;
-  const sourceMatch = typeof workflowSource === 'string'
-    ? workflowSource.match(
-      /^bradygaster\/squad\/workflows\/package\/squad-review\.md@([0-9a-f]{40})$/,
-    )
-    : undefined;
-  exactObjectKeys(
-    provenance,
-    ['schemaVersion', 'package', 'source', 'resolvedCommit', 'installer', 'files'],
-    'committed first-install package provenance',
-  );
-  requireThat(provenance.schemaVersion === 1 &&
-    provenance.package === PACKAGE_NAME &&
-    SHA.test(revision ?? '') &&
-    provenance.source === `${PACKAGE_NAME}@${revision}` &&
-    typeof provenance.installer === 'string' &&
-    new RegExp(`^gh-aw ${MIN_GH_AW_VERSION.replaceAll('.', '\\.')}(?:\\b|$)`)
-      .test(provenance.installer) &&
-    Array.isArray(provenance.files) && provenance.files.length === OWNERSHIP_ENTRY_COUNT &&
-    sourceMatch?.[1] === revision,
-  'invalid committed first-install package provenance');
-
-  const canonicalManifestEvidence = await committedFileEvidence(
-    get,
-    INSTALL_SOURCE_REPOSITORY,
-    CONTRACT_SOURCE,
-    revision,
-  );
-  let manifest;
-  try {
-    manifest = JSON.parse(canonicalManifestEvidence.content.toString('utf8'));
-    validateContract(manifest);
-  } catch (error) {
-    throw new Error(`Squad review refused: invalid immutable package manifest: ${error.message}`);
-  }
-  const installedManifestEvidence = await committedFileEvidence(
-    get,
-    repository,
-    INSTALL_MANIFEST,
-    ref,
-  );
+  requireThat(JSON.stringify(commentProvenance) === JSON.stringify(provenance),
+    'bootstrap PR and bot-authenticated comment provenance differ');
   requireThat(
-    installedManifestEvidence.content.equals(canonicalManifestEvidence.content),
-    'installed manifest is not byte-identical to the immutable package manifest',
+    pr.title === BOOTSTRAP_TITLE &&
+    pr.head.ref === BOOTSTRAP_BRANCH &&
+    pr.user?.login === BOT &&
+    pr.user?.type === 'Bot' &&
+    provenance.repository === repository &&
+    /^[1-9]\d*$/.test(provenance.run_id ?? '') &&
+    provenance.install_sha === pr.base.sha &&
+    provenance.cast_sha === pr.head.sha,
+    'invalid base-controlled bootstrap pull request',
   );
-
-  const expected = expectedOwnership(manifest);
-  const seen = new Set();
-  const installedOwned = new Map();
-  for (let index = 0; index < expected.length; index++) {
-    const owned = provenance.files[index];
-    const trusted = expected[index];
-    exactObjectKeys(owned, ['source', 'destination', 'sha256'], `ownership file ${index}`);
-    requireThat(owned.source === trusted.source && owned.destination === trusted.destination &&
-      SHA256.test(owned.sha256), `moved or malformed ownership file ${index}`);
-    requireThat(!seen.has(owned.destination), `duplicate ownership destination ${owned.destination}`);
-    seen.add(owned.destination);
-    const evidence = await committedFileEvidence(get, repository, owned.destination, ref);
-    requireThat(evidence.sha256 === owned.sha256,
-      `installed bytes do not match ownership for ${owned.destination}`);
-    installedOwned.set(owned.destination, evidence);
-  }
-
-  const canonicalSources = new Map(await Promise.all([
-    ...manifest.workflows.map(entry => entry.source),
-    ...manifest.shared_runtime.map(entry => entry.source),
-    ...manifest.skills.map(entry => entry.source),
-  ].map(async source => [
-    source,
-    await committedFileEvidence(get, INSTALL_SOURCE_REPOSITORY, source, revision),
-  ])));
-
-  for (const entry of manifest.workflows) {
-    const canonical = canonicalSources.get(entry.source);
-    requireThat(canonical.sha256 === entry.source_sha256,
-      `immutable package source digest mismatch for ${entry.source}`);
-    const installed = installedOwned.get(entry.destination);
-    const canonicalized = workflowSourceBytes(installed.content, entry.source, revision);
-    requireThat(
-      sha256(canonicalized) === canonical.sha256 ||
-      sha256(Buffer.from(`${canonicalized.toString('utf8')}\n`)) === canonical.sha256,
-      `installed workflow content mismatch for ${entry.destination}`,
-    );
-    const lock = await committedFileEvidence(get, repository, entry.lock, ref);
-    requireThat(
-      sha256(normalizeCompiledLock(lock.content, revision)) === entry.lock_sha256,
-      `installed compiled lock mismatch for ${entry.lock}`,
-    );
-  }
-
-  for (const entry of manifest.shared_runtime) {
-    const canonical = canonicalSources.get(entry.source);
-    requireThat(canonical.sha256 === entry.sha256,
-      `immutable runtime digest mismatch for ${entry.source}`);
-    const installed = installedOwned.get(entry.package_destination);
-    requireThat(installed.content.equals(canonical.content),
-      `installed runtime content mismatch for ${entry.package_destination}`);
-  }
-
-  for (const entry of manifest.skills) {
-    const canonical = canonicalSources.get(entry.source);
-    requireThat(canonical.sha256 === entry.sha256,
-      `immutable skill digest mismatch for ${entry.source}`);
-    const installed = await committedFileEvidence(get, repository, entry.destination, ref);
-    requireThat(installed.content.equals(canonical.content),
-      `installed skill content mismatch for ${entry.destination}`);
-  }
-
-  const guard = manifest.shared_runtime.find(
-    entry => entry.path === 'shared/squad-review-guard.mjs',
+  const run = await get(`repos/${repository}/actions/runs/${provenance.run_id}`);
+  requireThat(
+    run.event === 'push' &&
+    run.path === BOOTSTRAP_WORKFLOW &&
+    run.repository?.full_name === repository &&
+    run.head_sha === pr.base.sha &&
+    run.head_branch === pr.base.ref &&
+    (!requireRunSuccess || (run.status === 'completed' && run.conclusion === 'success')),
+    requireRunSuccess
+      ? 'base-controlled bootstrap run did not complete successfully'
+      : 'bootstrap provenance is not bound to the base-controlled workflow run',
   );
-  requireThat(guard?.package_destination === '.github/workflows/shared/squad-review-guard.mjs' &&
-    installedOwned.get(guard.package_destination)?.sha256 === guardSha256 &&
-    canonicalSources.get(guard.source)?.sha256 === guardSha256,
-  'first-install package does not bind the executing guard');
+  return {
+    schema: 'squad-review-author/v1',
+    repository,
+    issue: pr.number,
+    author_agent: BOOTSTRAP_AUTHOR,
+    reviewer_agent: BOOTSTRAP_REVIEWER,
+  };
 }
 
 export async function reviewTarget(
@@ -320,10 +197,7 @@ export async function reviewTarget(
   get,
   {
     relay = false,
-    firstInstall = false,
-    workflowSha,
-    workflowGuardSha256,
-    workflowSource,
+    requireBootstrapRunSuccess = false,
   } = {},
 ) {
   const repository = env.GITHUB_REPOSITORY;
@@ -354,29 +228,18 @@ export async function reviewTarget(
     repository,
     '.squad-review.json',
     pr.head.sha,
-    { allowMissing: firstInstall },
+    { allowMissing: true },
   );
   let attribution;
   if (value === undefined) {
-    requireThat(firstInstall === true && relay === false &&
-      env.GITHUB_EVENT_NAME === 'pull_request' &&
-      SHA.test(workflowSha ?? '') && workflowSha === pr.head.sha &&
-      typeof workflowGuardSha256 === 'string' && /^[0-9a-f]{64}$/.test(workflowGuardSha256),
-    'missing committed attribution outside an immutable clean first install');
-    await validateFirstInstallPackage(
+    requireThat(relay === false && env.GITHUB_EVENT_NAME === 'pull_request',
+      'missing committed attribution outside base-controlled bootstrap activation');
+    attribution = await validateBootstrapAttribution(
       get,
       repository,
-      pr.head.sha,
-      workflowSource,
-      workflowGuardSha256,
+      pr,
+      requireBootstrapRunSuccess,
     );
-    attribution = {
-      schema: 'squad-review-author/v1',
-      repository,
-      issue: issue ?? number,
-      author_agent: INSTALL_AUTHOR,
-      reviewer_agent: INSTALL_REVIEWER,
-    };
   } else {
     const registry = await committedJson(
       get,
@@ -403,8 +266,6 @@ async function currentEvidence(target, get) {
 
 export async function enforceReviewOutputs(env, get, options = {}) {
   requireThat(['pull_request', 'workflow_dispatch'].includes(env.GITHUB_EVENT_NAME), 'invalid event');
-  requireThat(options.firstInstall !== true || typeof options.workflowSource === 'string',
-    'first-install output binding requires immutable workflow source provenance');
   const target = await reviewTarget(env, get, options);
   const output = JSON.parse(readFileSync(env.GH_AW_AGENT_OUTPUT, 'utf8'));
   requireThat(Array.isArray(output.items), 'missing safe-output items');
@@ -455,7 +316,10 @@ export async function enforceReviewOutputs(env, get, options = {}) {
 export async function assertClearingReview(env, get, options = {}) {
   const { relay = false } = options;
   requireThat(env.GITHUB_EVENT_NAME === 'pull_request', 'only PR runs can clear review');
-  const target = await reviewTarget(env, get, options);
+  const target = await reviewTarget(env, get, {
+    ...options,
+    requireBootstrapRunSuccess: true,
+  });
   const candidates = await currentEvidence(target, get);
   requireThat(candidates.length === 1, 'missing or duplicate verdict evidence');
   const review = candidates[0];
@@ -514,6 +378,9 @@ export async function assertClearingReview(env, get, options = {}) {
       `repos/${target.repository}/collaborators/${comment.user.login}/permission`);
     requireThat(permission.permission === 'admin', 'override requires repository administrator');
   }
-  await reviewTarget(env, get, options);
+  await reviewTarget(env, get, {
+    ...options,
+    requireBootstrapRunSuccess: true,
+  });
   return verdict;
 }
