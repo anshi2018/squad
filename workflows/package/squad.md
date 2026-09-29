@@ -472,7 +472,6 @@ safe-outputs:
     workflows:
       - squad-implement-worker
       - squad-deps-worker
-      - squad-review
       - squad-retro
       - squad-improvement-worker
     max: 3
@@ -740,6 +739,7 @@ on:
         type: string
 if: github.event_name != 'issues' || github.actor != 'github-actions[bot]' || github.event.issue.title != '[Research Proposals] Agent-discovered repo opportunities' || !contains(github.event.issue.body, '<!-- squad:bootstrap-opportunities schema=1 -->')
 permissions:
+  actions: read
   contents: read
   copilot-requests: write
   issues: read
@@ -2228,32 +2228,44 @@ and includes the verified PR number, URL, and CI-approval guidance.
 
 ## skill: `squad-review-relay`
 ---
-description: Relay `/squad review` on a pull request to the independent reviewer.
+description: Guide an operator to rerun the automatic independent review.
 ---
 
 This mode is only valid from a pull request comment or pull request review
 comment. Resolve the pull request number and current 40-character lowercase
 head SHA from GitHub's API, not from user text. If either cannot be established,
 post one `add-comment` explaining that `/squad review` must target a pull
-request, then stop without dispatching.
+request, then stop.
 
-Use only the typed `dispatch-workflow` safe-output. Never call the generic
-`dispatch_workflow` tool. Emit exactly one dispatch:
+List workflow runs for `.github/workflows/squad-review.lock.yml`. Keep only
+`pull_request_target` runs associated with this pull request whose workflow
+head SHA equals the pull request's exact base SHA. Select the newest run by
+creation time, breaking ties by numeric run ID, then fetch its jobs and require
+exactly one job named `Squad Review Authority / attest`. Also fetch check runs
+for the exact current PR head and require exactly one `Squad Review / review`
+check whose external ID, details URL, GitHub Actions App identity, and
+`squad-review-check/v1` summary bind that base-controlled run, PR, base SHA,
+head SHA, run ID, and attempt. A same-named check without that binding is
+advisory only. If no matching run or authority check exists, emit exactly one
+`add-comment` stating that no base-controlled automatic review run exists for
+the exact head and that a new PR event
+(`synchronize`, reopen, or ready-for-review) is required. Stop without implying
+that a rerun occurred.
 
-```json
-{
-  "workflow_name": "squad-review",
-  "inputs": {
-    "issue_number": "{pull-request-number}",
-    "expected_head_sha": "{current-head-sha}",
-    "request_origin": "manual"
-  }
-}
-```
+Otherwise emit exactly one `add-comment` on the pull request that includes the
+selected run URL, run ID, attempt, status, conclusion, exact head SHA, and this
+instruction:
+
+> Squad Review is automatic and cannot be dispatched from a branch. In the
+> selected base-controlled automatic run, choose **Re-run all jobs**. This
+> command did not rerun it. Only the new attempt of that exact
+> `pull_request_target` run can publish verdict evidence and the exact-head
+> `Squad Review / review` check for PR #{pull-request-number}
+> at head `{current-head-sha}`.
 
 Do not review the diff in this router, emit a verdict, edit files, create an
-issue, or dispatch any other workflow. The independent reviewer owns all
-provenance, deduplication, and review decisions.
+issue, or dispatch a workflow. The independent reviewer owns all provenance,
+deduplication, and review decisions.
 
 ## skill: `squad-retro-relay`
 ---

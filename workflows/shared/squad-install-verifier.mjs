@@ -32,6 +32,7 @@ export const TRIGGER_PROBE_DESTINATION =
 
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const REVISION_PATTERN = /^[0-9a-f]{40}$/;
+const LOCK_REVISION_PLACEHOLDER = 'f'.repeat(40);
 
 function deepFreeze(value) {
   if (value && typeof value === 'object' && !Object.isFrozen(value)) {
@@ -158,13 +159,18 @@ export function validateContract(contract) {
 
   assertArray(contract.workflows, WORKFLOW_TUPLES.length, 'Integrity contract workflows');
   contract.workflows.forEach((entry, index) => {
-    assertKeys(entry, ['name', 'source', 'destination', 'lock', 'source_sha256'], `Workflow entry ${index}`);
+    assertKeys(
+      entry,
+      ['name', 'source', 'destination', 'lock', 'source_sha256', 'lock_sha256'],
+      `Workflow entry ${index}`,
+    );
     const [name, source, destination, lock] = WORKFLOW_TUPLES[index];
     if (entry.name !== name) throw new Error(`Workflow entry ${index} name must be ${name}.`);
     validatePathSyntax(entry.source, source, `Workflow ${name} source`);
     validatePathSyntax(entry.destination, destination, `Workflow ${name} destination`);
     validatePathSyntax(entry.lock, lock, `Workflow ${name} lock`);
     assertDigest(entry.source_sha256, `Workflow ${name} source_sha256`);
+    assertDigest(entry.lock_sha256, `Workflow ${name} lock_sha256`);
   });
 
   assertArray(contract.shared_runtime, RUNTIME_TUPLES.length, 'Integrity contract shared_runtime');
@@ -320,7 +326,77 @@ function packageWorkflowSource(_root, name) {
   return `workflows/package/${name}.md`;
 }
 
+function workflowWithSource(content, name, revision) {
+  const marker = '\n---\n';
+  const end = content.indexOf(marker, 4);
+  if (!content.startsWith('---\n') || end < 0) {
+    throw new Error(`Generated package workflow has invalid frontmatter: ${name}`);
+  }
+  return `${content.slice(0, end)}
+source: ${PACKAGE_NAME}/package/${name}.md@${revision}${content.slice(end)}`;
+}
+
+export function normalizeCompiledLock(content, revision) {
+  if (!REVISION_PATTERN.test(revision)) {
+    throw new Error('Compiled lock revision must be a lowercase 40-character SHA.');
+  }
+  const text = Buffer.isBuffer(content) ? content.toString('utf8') : String(content);
+  if (!text.includes(revision)) {
+    throw new Error('Compiled lock is not bound to the expected package revision.');
+  }
+  const metadata = text.match(
+    /^(# gh-aw-metadata: \{[^\n]*"frontmatter_hash":")([0-9a-f]{64})("[^\n]*\})$/m,
+  );
+  if (!metadata) throw new Error('Compiled lock has missing or malformed gh-aw metadata.');
+  return text
+    .replace(metadata[0], `${metadata[1]}${'0'.repeat(64)}${metadata[3]}`)
+    .replace(
+      /^(\s*-\s+cron:\s+)"[^"]+"(\s+# Friendly format: .+ \(scattered\))$/gm,
+      '$1"<repository-scattered>"$2',
+    )
+    .replaceAll(revision, LOCK_REVISION_PLACEHOLDER);
+}
+
+function buildLockDigests(root, renderedWorkflows) {
+  const scratch = mkdtempSync(join(resolve(root), '.squad-gh-aw-lock-digests-'));
+  try {
+    const workflowRoot = resolve(scratch, '.github/workflows');
+    mkdirSync(workflowRoot, { recursive: true });
+    cpSync(resolve(root, 'workflows/shared'), resolve(workflowRoot, 'shared'), { recursive: true });
+    for (const [name, content] of renderedWorkflows) {
+      writeFileSync(
+        resolve(workflowRoot, `${name}.md`),
+        workflowWithSource(content, name, LOCK_REVISION_PLACEHOLDER),
+      );
+    }
+    spawnChecked('git', ['init', '--quiet'], scratch);
+    const ghAwBin = process.env.SQUAD_GH_AW_BIN;
+    const command = ghAwBin || 'gh';
+    const args = ghAwBin
+      ? ['compile', '--strict', '--no-check-update']
+      : ['aw', 'compile', '--strict', '--no-check-update'];
+    const result = spawnSync(command, args, {
+      cwd: scratch,
+      encoding: 'utf8',
+      env: process.env,
+    });
+    if (result.error || result.status !== 0) {
+      throw result.error ?? new Error(`${command} failed:\n${result.stdout}${result.stderr}`);
+    }
+    return new Map(WORKFLOW_NAMES.map((name) => {
+      const lock = readRequired(scratch, `.github/workflows/${name}.lock.yml`);
+      return [name, sha256(normalizeCompiledLock(lock, LOCK_REVISION_PLACEHOLDER))];
+    }));
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+}
+
 export function buildContract(root) {
+  const renderedWorkflows = new Map(WORKFLOW_NAMES.map(
+    name => [name, readFileSync(resolve(root, `workflows/package/${name}.md`), 'utf8')],
+  ));
+  const lockDigests = buildLockDigests(root, renderedWorkflows);
   return validateContract({
     schema_version: 1,
     package: PACKAGE_NAME,
@@ -329,10 +405,15 @@ export function buildContract(root) {
     revision_policy: { ...REVISION_POLICY },
     workflows: WORKFLOW_TUPLES.map(([name, , destination, lock]) => {
       const source = packageWorkflowSource(root, name);
-      const content = source.startsWith('workflows/package/')
-        ? renderPackageWorkflow(root, name)
-        : readFileSync(resolve(root, source));
-      return { name, source, destination, lock, source_sha256: sha256(content) };
+      const content = renderedWorkflows.get(name);
+      return {
+        name,
+        source,
+        destination,
+        lock,
+        source_sha256: sha256(content),
+        lock_sha256: lockDigests.get(name),
+      };
     }),
     shared_runtime: RUNTIME_TUPLES.map(
       ([path, source, package_destination, destination, ownership]) => ({
@@ -420,10 +501,13 @@ function updateEmbeddedDigests(root) {
 
 export function writeSource(root) {
   updateEmbeddedDigests(root);
-  for (const [path, content] of generatedFiles(root)) {
+  for (const name of WORKFLOW_NAMES) {
+    const path = resolve(root, `workflows/package/${name}.md`);
     mkdirSync(dirname(path), { recursive: true });
-    writeFileSync(path, content);
+    writeFileSync(path, renderPackageWorkflow(root, name));
   }
+  writeFileSync(resolve(root, PACKAGE_MANIFEST), renderManifest(root));
+  writeFileSync(resolve(root, CONTRACT_SOURCE), stableJson(buildContract(root)));
 }
 
 export function checkSource(root) {
@@ -432,6 +516,7 @@ export function checkSource(root) {
     const digests = expectedEmbeddedDigests(root);
     const dispatcher = readFileSync(resolve(root, 'workflows/squad.md'), 'utf8');
     const bootstrap = readFileSync(resolve(root, 'workflows/squad-bootstrap.md'), 'utf8');
+    const reviewer = readFileSync(resolve(root, 'workflows/squad-review.md'), 'utf8');
     if (!dispatcher.includes(`validator_expected_sha256="${digests.cast}"`)) {
       failures.push('Generated Cast validator digest is stale in workflows/squad.md.');
     }
@@ -449,6 +534,22 @@ export function checkSource(root) {
       else if (readFileSync(path, 'utf8') !== expected) {
         failures.push(`Generated package file is stale: ${relative(root, path)} (run: npm run gh-aw:integrity:write)`);
       }
+    }
+    for (const required of [
+      'environment: squad-review-authority',
+      'SQUAD_REVIEW_APP_PRIVATE_KEY: ${{ secrets.SQUAD_REVIEW_APP_PRIVATE_KEY }}',
+      'github-token: ${{ steps.squad-review-app-token.outputs.token }}',
+      'published.data.app?.id !== expectedAppId',
+      "expectedAppId === 15368",
+      "expectedAppSlug === 'github-actions'",
+    ]) {
+      if (!reviewer.includes(required)) {
+        failures.push(`Dedicated review authority contract is missing: ${required}`);
+      }
+    }
+    const publishJob = reviewer.match(/\n  publish:\n([\s\S]*?)\n---\n/)?.[1] ?? '';
+    if (publishJob.includes('checks: write')) {
+      failures.push('Dedicated review publisher must not grant checks:write to github.token.');
     }
   } catch (error) {
     failures.push(error instanceof Error ? error.message : String(error));
@@ -565,6 +666,15 @@ function verifyInstalledBytes(root, contract, revision) {
     }
   }
   for (const entry of contract.workflows) readRequired(root, entry.lock);
+  for (const entry of contract.workflows) {
+    const normalized = normalizeCompiledLock(readRequired(root, entry.lock), revision);
+    const observedDigest = sha256(normalized);
+    if (observedDigest !== entry.lock_sha256) {
+      throw new Error(
+        `Installed digest mismatch for ${entry.lock}: expected ${entry.lock_sha256}, observed ${observedDigest}.`,
+      );
+    }
+  }
 }
 
 function verifyTriggerNamespace(root) {
@@ -725,6 +835,20 @@ export function materializeRuntime(root) {
 export function writeLocalTestOwnership(root, revision) {
   if (!REVISION_PATTERN.test(revision)) throw new Error('Local test revision must be a lowercase 40-character SHA.');
   const { contract } = parseInstalledContract(root);
+  for (const entry of contract.workflows) {
+    const path = safePath(root, entry.destination);
+    const content = readRequired(root, entry.destination).toString('utf8');
+    const end = content.indexOf('\n---\n', 4);
+    if (!content.startsWith('---\n') || end < 0) {
+      throw new Error(`Installed workflow has invalid frontmatter: ${entry.destination}`);
+    }
+    const frontmatter = content.slice(0, end);
+    const source = `source: bradygaster/squad/${entry.source}@${revision}`;
+    const rebound = /^source:\s*.+$/m.test(frontmatter)
+      ? `${frontmatter.replace(/^source:\s*.+$/m, source)}${content.slice(end)}`
+      : `${frontmatter}\n${source}${content.slice(end)}`;
+    writeFileSync(path, rebound);
+  }
   const files = expectedOwnership(contract).map((entry) => ({
     ...entry,
     sha256: fileDigest(root, entry.destination),

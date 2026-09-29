@@ -742,6 +742,9 @@ describe('automatic Squad bootstrap workflow', () => {
     expect(lock).toContain('SQUAD_BOOTSTRAP_REPOSITORY: ${{ github.repository }}');
     expect(lock).toContain('SQUAD_BOOTSTRAP_RUN_ID: ${{ github.run_id }}');
     expect(lock).toContain('squad:bootstrap-provenance');
+    expect(lock).toContain('Base-controlled bootstrap provenance. Do not edit this comment.');
+    expect(lock).toContain('github.rest.issues.createComment');
+    expect(lock).toContain('github.rest.issues.updateComment');
     expect(lock).toContain('pullRequestDetails.head.repo?.full_name !== provenance.repository');
     expect(lock).toContain('body: `${provenanceMarker}\\n${prBodyWithoutProvenance}`');
     expect(lock).toContain('body: markedIssueBody');

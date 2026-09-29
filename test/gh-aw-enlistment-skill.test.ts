@@ -115,10 +115,11 @@ describe('gh-aw-enlistment skill', () => {
 
       // Every backtick-delimited token in the region — order-independent exact set.
       const tokens = [...region.matchAll(/`([^`]+)`/g)].map(m => m[1]);
-      expect(tokens.slice().sort(), 'allowlist tokens must be exactly the three documented entries').toEqual(
+      expect(tokens.slice().sort(), 'allowlist tokens must be exactly the four documented entries').toEqual(
         [
           'SQUAD_GITHUB_APP_PRIVATE_KEY',
           'SQUAD_GITHUB_TOKEN',
+          'SQUAD_REVIEW_APP_PRIVATE_KEY',
           'bradygaster/squad/.github/actions/squad-init',
         ].sort()
       );

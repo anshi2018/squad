@@ -16,6 +16,8 @@ const SUBMITTED = '2026-09-28T12:01:01Z';
 const FINISHED = '2026-09-28T12:02:00Z';
 const MERGED = '2026-09-28T12:03:00Z';
 const NOW = Date.parse('2026-09-28T12:04:00Z');
+const REVIEW_APP_ID = 424242;
+const REVIEW_APP_SLUG = 'squad-review-authority';
 const workspaces: string[] = [];
 
 afterEach(() => {
@@ -27,9 +29,11 @@ afterEach(() => {
 function fixture(relay = false) {
   vi.spyOn(Date, 'now').mockReturnValue(NOW);
   const env = {
-    GITHUB_EVENT_NAME: 'pull_request', GITHUB_REPOSITORY: REPOSITORY,
+    GITHUB_EVENT_NAME: 'pull_request_target', GITHUB_REPOSITORY: REPOSITORY,
+    GITHUB_SERVER_URL: 'https://github.com',
     GITHUB_RUN_ID: '17', GITHUB_RUN_ATTEMPT: '1',
-    SQUAD_REVIEW_PR: '42', SQUAD_REVIEW_HEAD: HEAD, SQUAD_REVIEW_DEFAULT_BRANCH: 'dev',
+    SQUAD_REVIEW_PR: '42', SQUAD_REVIEW_HEAD: HEAD,
+    SQUAD_REVIEW_WORKFLOW_SHA: BASE, SQUAD_REVIEW_DEFAULT_BRANCH: 'dev',
   };
   const attribution = {
     schema: 'squad-review-author/v1', repository: REPOSITORY, issue: 9,
@@ -44,28 +48,69 @@ function fixture(relay = false) {
   };
   const pr = {
     number: 42, state: relay ? 'closed' : 'open', merged: relay, merged_at: MERGED,
+    title: 'Implementation',
     body: '<!-- squad:implement issue=9 run=7 -->',
+    user: { login: 'human', type: 'User' },
     head: { sha: HEAD, ref: 'squad/implement-9-fix', repo: { full_name: REPOSITORY, name: 'example' } },
     base: { sha: BASE, ref: 'dev', repo: { full_name: REPOSITORY, name: 'example' } },
   };
   const verdict = {
     schema: 'squad-review-verdict/v1', repository: REPOSITORY, pull_request: 42,
-    head_sha: HEAD, author_agent: 'implementer', reviewer_agent: 'reviewer',
-    result: 'COMMENT', timestamp: ISSUED, run_id: 17, run_attempt: 1, event: 'pull_request',
+    base_sha: BASE, head_sha: HEAD, author_agent: 'implementer', reviewer_agent: 'reviewer',
+    result: 'COMMENT', timestamp: ISSUED, run_id: 17, run_attempt: 1,
+    event: 'pull_request_target', workflow_path: '.github/workflows/squad-review.lock.yml',
+    workflow_sha: BASE,
   };
   const review = {
-    id: 123, user: { login: 'github-actions[bot]' }, commit_id: HEAD,
+    id: 123, user: { login: 'github-actions[bot]', id: 41898282, type: 'Bot' }, commit_id: HEAD,
     state: 'COMMENTED', submitted_at: SUBMITTED,
     body: '',
   };
   const run = {
-    event: 'pull_request', path: '.github/workflows/squad-review.lock.yml',
+    event: 'pull_request_target', path: '.github/workflows/squad-review.lock.yml',
     display_title: 'Squad review \u2014 PR #42',
-    repository: { full_name: REPOSITORY }, head_sha: HEAD, run_attempt: 1,
+    repository: { full_name: REPOSITORY }, head_sha: BASE, run_attempt: 1,
     pull_requests: [{ number: 42, head: { sha: HEAD }, base: { repo: { name: 'example' } } }],
     run_started_at: START, updated_at: FINISHED, status: 'completed', conclusion: 'success',
   };
-  const jobs = [{ name: CHECK_NAME, conclusion: 'success', completed_at: FINISHED }];
+  const jobs = [{
+    name: 'Squad Review Authority / attest',
+    conclusion: 'success',
+    completed_at: FINISHED,
+  }];
+  const checkRuns = [{
+    id: 88,
+    name: CHECK_NAME,
+    external_id: `squad-review-authority/v1:${REPOSITORY}:42:${BASE}:${HEAD}`,
+    head_sha: HEAD,
+    status: 'completed',
+    conclusion: 'success',
+    completed_at: FINISHED,
+    details_url: `https://github.com/${REPOSITORY}/actions/runs/17`,
+    app: { id: REVIEW_APP_ID, slug: REVIEW_APP_SLUG },
+    output: {
+      summary: JSON.stringify({
+        schema: 'squad-review-check/v1',
+        repository: REPOSITORY,
+        pull_request: 42,
+        base_sha: BASE,
+        head_sha: HEAD,
+        workflow_sha: BASE,
+        run_id: 17,
+        run_attempt: 1,
+        event: 'pull_request_target',
+        workflow_path: '.github/workflows/squad-review.lock.yml',
+        authority_job: 'Squad Review Authority / attest',
+        publisher_app_id: REVIEW_APP_ID,
+        publisher_app_slug: REVIEW_APP_SLUG,
+      }),
+    },
+  }];
+  const bootstrapRun = {
+    event: 'push', path: '.github/workflows/squad-bootstrap.lock.yml',
+    repository: { full_name: REPOSITORY }, head_sha: BASE, head_branch: 'dev',
+    status: 'completed', conclusion: 'success',
+  };
   const override = {
     schema: 'squad-review-override/v1', repository: REPOSITORY, pull_request: 42,
     head_sha: HEAD, review_id: 123, reason: 'Accepted false positive; linked human decision.',
@@ -78,10 +123,13 @@ function fixture(relay = false) {
     reviews: [review], comments: [] as typeof comment[], permission: 'admin',
     missingManifest: false, calls: [] as string[], prReads: 0, changeAfterFirstRead: false,
   };
-  const encode = (value: unknown) => ({
-    type: 'file', encoding: 'base64', size: 1000,
-    content: Buffer.from(JSON.stringify(value)).toString('base64'),
-  });
+  const encode = (value: unknown) => {
+    const content = Buffer.from(JSON.stringify(value));
+    return {
+      type: 'file', encoding: 'base64', size: content.length,
+      content: content.toString('base64'),
+    };
+  };
   const get = async (route: string, fields?: Record<string, unknown>) => {
     state.calls.push(route);
     if (route.endsWith('/pulls/42')) {
@@ -89,9 +137,14 @@ function fixture(relay = false) {
       if (state.changeAfterFirstRead && state.prReads > 1) pr.head.sha = BASE;
       return structuredClone(pr);
     }
+    if (route === `repos/${REPOSITORY}`) {
+      return { full_name: REPOSITORY, default_branch: 'dev' };
+    }
     if (route.endsWith('/contents/.squad-review.json')) {
       expect(fields?.ref).toBe(HEAD);
-      if (state.missingManifest) throw new Error('404 missing committed attribution');
+      if (state.missingManifest) {
+        throw Object.assign(new Error('Not Found'), { status: 404 });
+      }
       return encode(attribution);
     }
     if (route.endsWith('/contents/.squad/casting/registry.json')) {
@@ -100,8 +153,10 @@ function fixture(relay = false) {
     }
     if (route.endsWith('/reviews')) return state.reviews;
     if (route.endsWith('/actions/runs/17')) return run;
+    if (route.endsWith('/actions/runs/29')) return bootstrapRun;
     if (route.endsWith('/attempts/1')) return { ...run, run_attempt: 1, run_started_at: START };
     if (/\/attempts\/[12]\/jobs$/.test(route)) return { jobs };
+    if (route.endsWith(`/commits/${HEAD}/check-runs`)) return { check_runs: checkRuns };
     if (route.endsWith('/comments')) return state.comments;
     if (route.endsWith('/permission')) return { permission: state.permission };
     throw new Error(`Unexpected API route: ${route}`);
@@ -111,10 +166,117 @@ function fixture(relay = false) {
     comment.body = `${OVERRIDE_PREFIX}${JSON.stringify(override)}`;
   };
   sync();
-  return { env, attribution, registry, pr, verdict, review, run, jobs, override, comment, state, get, sync };
+  return {
+    env, attribution, registry, pr, verdict, review, run, bootstrapRun, jobs, checkRuns,
+    override, comment,
+    state, encode, get, sync,
+  };
+}
+
+function makeBootstrap(f: ReturnType<typeof fixture>) {
+  f.state.missingManifest = true;
+  f.pr.title = '[squad] Cast your Squad';
+  f.pr.user = { login: 'github-actions[bot]', type: 'Bot' };
+  f.pr.head.ref = 'squad/bootstrap-cast';
+  f.pr.body = `<!-- squad:bootstrap-provenance ${JSON.stringify({
+    schema: 1,
+    repository: REPOSITORY,
+    run_id: '29',
+    install_sha: BASE,
+    cast_sha: HEAD,
+  })} -->`;
+  f.state.comments.push({
+    user: { login: 'github-actions[bot]', type: 'Bot' },
+    created_at: START,
+    updated_at: START,
+    body: `${f.pr.body}\nBase-controlled bootstrap provenance. Do not edit this comment.`,
+  });
+  f.verdict.author_agent = '@squad/base-controlled-bootstrap';
+  f.verdict.reviewer_agent = '@squad/base-controlled-review';
+  f.sync();
 }
 
 describe('independent Squad review guard', () => {
+  it('uses reserved workflow roles only for the base-controlled post-install bootstrap PR', async () => {
+    const f = fixture();
+    makeBootstrap(f);
+    f.state.reviews = [];
+    await expect(reviewTarget(f.env, f.get)).resolves.toMatchObject({
+      author_agent: '@squad/base-controlled-bootstrap',
+      reviewer_agent: '@squad/base-controlled-review',
+    });
+
+    const workspace = mkdtempSync(join(tmpdir(), 'squad-review-bootstrap-'));
+    workspaces.push(workspace);
+    const path = join(workspace, 'output.json');
+    writeFileSync(path, JSON.stringify({ items: [{
+      type: 'submit_pull_request_review', event: 'COMMENT', body: 'Bootstrap Cast reviewed.',
+    }] }));
+    await enforceReviewOutputs({ ...f.env, GH_AW_AGENT_OUTPUT: path }, f.get);
+    const output = JSON.parse(readFileSync(path, 'utf8'));
+    expect(output.items[0].body).toContain('"author_agent":"@squad/base-controlled-bootstrap"');
+    expect(output.items[0].body).toContain(
+      '"reviewer_agent":"@squad/base-controlled-review"',
+    );
+  });
+
+  it('refuses arbitrary first-install PRs even when they contain package-shaped claims', async () => {
+    const f = fixture();
+    f.state.missingManifest = true;
+    f.pr.title = 'ci: add Squad agentic workflow';
+    f.pr.body = `Package: bradygaster/squad/workflows@${HEAD}`;
+    await expect(reviewTarget(f.env, f.get))
+      .rejects.toThrow('missing or duplicate base-controlled bootstrap PR provenance');
+  });
+
+  it.each([
+    ['branch', (f: ReturnType<typeof fixture>) => { f.pr.head.ref = 'attacker/bootstrap'; }],
+    ['title', (f: ReturnType<typeof fixture>) => { f.pr.title = 'Trusted bootstrap'; }],
+    ['author', (f: ReturnType<typeof fixture>) => { f.pr.user.login = 'attacker'; }],
+    ['head', (f: ReturnType<typeof fixture>) => {
+      f.pr.body = f.pr.body.replace(HEAD, BASE);
+    }],
+    ['base run', (f: ReturnType<typeof fixture>) => { f.bootstrapRun.head_sha = HEAD; }],
+    ['workflow', (f: ReturnType<typeof fixture>) => {
+      f.bootstrapRun.path = '.github/workflows/attacker.yml';
+    }],
+    ['comment', (f: ReturnType<typeof fixture>) => {
+      f.state.comments[0].body = f.state.comments[0].body.replace(HEAD, BASE);
+    }],
+    ['comment author', (f: ReturnType<typeof fixture>) => {
+      f.state.comments[0].user.login = 'attacker';
+    }],
+  ])('refuses a bootstrap activation with mutated %s provenance', async (_label, mutate) => {
+    const f = fixture();
+    makeBootstrap(f);
+    mutate(f);
+    await expect(reviewTarget(f.env, f.get)).rejects.toThrow();
+  });
+
+  it('requires successful base-controlled bootstrap completion at the clearing gate', async () => {
+    const f = fixture();
+    makeBootstrap(f);
+    f.bootstrapRun.status = 'in_progress';
+    f.bootstrapRun.conclusion = null;
+    await expect(reviewTarget(f.env, f.get)).resolves.toMatchObject({
+      author_agent: '@squad/base-controlled-bootstrap',
+    });
+    await expect(assertClearingReview(f.env, f.get))
+      .rejects.toThrow('base-controlled bootstrap run did not complete successfully');
+  });
+
+  it('does not rescue malformed attribution or non-404 reads', async () => {
+    const f = fixture();
+    f.attribution.schema = 'wrong';
+    await expect(reviewTarget(f.env, f.get)).rejects.toThrow('malformed committed');
+    await expect(reviewTarget(f.env, async (route, fields) => {
+      if (route.endsWith('/contents/.squad-review.json')) {
+        throw Object.assign(new Error('Forbidden'), { status: 403 });
+      }
+      return f.get(route, fields);
+    })).rejects.toThrow('Forbidden');
+  });
+
   it('accepts a distinct, committed, current-head verdict and merged-head relay', async () => {
     for (const relay of [false, true]) {
       const f = fixture(relay);
@@ -122,6 +284,43 @@ describe('independent Squad review guard', () => {
       expect(f.state.prReads).toBe(2);
       if (relay) expect(f.state.calls.some(route => route.endsWith('/jobs'))).toBe(true);
     }
+  });
+
+  it('ignores an ordinary-token forged check and accepts only the dedicated App check', async () => {
+    const f = fixture(true);
+    f.checkRuns.unshift({
+      ...structuredClone(f.checkRuns[0]),
+      id: 87,
+      app: { id: 15368, slug: 'github-actions' },
+      output: {
+        summary: JSON.stringify({
+          ...JSON.parse(f.checkRuns[0].output.summary),
+          publisher_app_id: 15368,
+          publisher_app_slug: 'github-actions',
+        }),
+      },
+    });
+    await expect(assertClearingReview(f.env, f.get, { relay: true }))
+      .resolves.toEqual(f.verdict);
+    f.checkRuns.splice(1);
+    await expect(assertClearingReview(f.env, f.get, { relay: true }))
+      .rejects.toThrow('missing or duplicate exact-head authority check');
+  });
+
+  it('refuses PR-controlled shaped review, job, check, and artifact evidence', async () => {
+    const f = fixture(true);
+    f.run.event = 'pull_request';
+    f.run.head_sha = HEAD;
+    f.jobs[0].name = CHECK_NAME;
+    f.checkRuns[0].external_id =
+      `squad-review-authority/v1:${REPOSITORY}:42:${BASE}:${HEAD}`;
+    f.checkRuns[0].output.summary = JSON.stringify({
+      ...JSON.parse(f.checkRuns[0].output.summary),
+      event: 'pull_request',
+      workflow_sha: HEAD,
+    });
+    await expect(assertClearingReview(f.env, f.get, { relay: true }))
+      .rejects.toThrow('not bound to this PR workflow run');
   });
 
   it.each([
@@ -151,11 +350,13 @@ describe('independent Squad review guard', () => {
 
   it.each([
     ['schema', 'other'], ['repository', 'other/repo'], ['pull_request', 41],
-    ['head_sha', BASE], ['author_agent', 'reviewer'], ['reviewer_agent', 'implementer'],
+    ['base_sha', HEAD], ['head_sha', BASE], ['author_agent', 'reviewer'],
+    ['reviewer_agent', 'implementer'],
     ['result', 'APPROVE'], ['result', ''], ['timestamp', 'bad'],
     ['timestamp', '2026-09-28T12:05:00Z'], ['timestamp', '2026-09-28T11:00:00Z'],
     ['timestamp', '2026-02-30T12:01:00Z'],
     ['run_id', 0], ['run_id', '17'], ['run_attempt', 0], ['event', 'workflow_dispatch'],
+    ['workflow_path', '.github/workflows/attacker.yml'], ['workflow_sha', HEAD],
   ])('refuses verdict mutation %s=%s at the real relay', async (key, value) => {
     const f = fixture(true);
     Object.assign(f.verdict, { [key]: value });
@@ -179,8 +380,11 @@ describe('independent Squad review guard', () => {
     'wrong-branch', 'duplicate-marker', 'stale-head', 'foreign-head', 'foreign-base', 'head-race',
     'not-merged', 'wrong-base', 'merge-before-review', 'merge-before-check',
     'failed-run', 'failed-check', 'missing-check', 'duplicate-check', 'wrong-check',
+    'forged-check', 'actions-app-check', 'wrong-check-app', 'wrong-check-app-slug',
+    'wrong-check-attestation', 'wrong-attested-app-id', 'wrong-attested-app-slug',
     'manual-run', 'wrong-workflow', 'wrong-run-repo', 'wrong-run-sha', 'wrong-run-pr',
     'wrong-run-attempt', 'wrong-run-title', 'verdict-before-run',
+    'wrong-bot-id', 'wrong-bot-type',
   ])('fails closed for %s', async mutation => {
     const f = fixture(true);
     switch (mutation) {
@@ -213,11 +417,36 @@ describe('independent Squad review guard', () => {
       case 'manual-run': f.run.event = 'workflow_dispatch'; break;
       case 'wrong-workflow': f.run.path = '.github/workflows/other.yml'; break;
       case 'wrong-run-repo': f.run.repository.full_name = 'other/repo'; break;
-      case 'wrong-run-sha': f.run.head_sha = BASE; break;
+      case 'wrong-run-sha': f.run.head_sha = HEAD; break;
       case 'wrong-run-pr': f.run.pull_requests[0].number = 43; break;
       case 'wrong-run-attempt': f.run.run_attempt = 0; break;
       case 'wrong-run-title': f.run.display_title = 'Squad review \u2014 PR #43'; break;
       case 'verdict-before-run': f.run.run_started_at = FINISHED; break;
+      case 'wrong-bot-id': f.review.user.id = 1; break;
+      case 'wrong-bot-type': f.review.user.type = 'User'; break;
+      case 'forged-check': f.checkRuns[0].external_id = 'forged'; break;
+      case 'actions-app-check':
+        f.checkRuns[0].app = { id: 15368, slug: 'github-actions' };
+        f.checkRuns[0].output.summary = JSON.stringify({
+          ...JSON.parse(f.checkRuns[0].output.summary),
+          publisher_app_id: 15368,
+          publisher_app_slug: 'github-actions',
+        });
+        break;
+      case 'wrong-check-app': f.checkRuns[0].app.id = 1; break;
+      case 'wrong-check-app-slug': f.checkRuns[0].app.slug = 'other-review-app'; break;
+      case 'wrong-attested-app-id': f.checkRuns[0].output.summary = JSON.stringify({
+        ...JSON.parse(f.checkRuns[0].output.summary),
+        publisher_app_id: 1,
+      }); break;
+      case 'wrong-attested-app-slug': f.checkRuns[0].output.summary = JSON.stringify({
+        ...JSON.parse(f.checkRuns[0].output.summary),
+        publisher_app_slug: 'other-review-app',
+      }); break;
+      case 'wrong-check-attestation': f.checkRuns[0].output.summary = JSON.stringify({
+        ...JSON.parse(f.checkRuns[0].output.summary),
+        event: 'pull_request',
+      }); break;
     }
     await expect(assertClearingReview(f.env, f.get, { relay: true })).rejects.toThrow();
   });
@@ -225,7 +454,7 @@ describe('independent Squad review guard', () => {
   it('does not accept a manual gate or the merge commit as the reviewed head', async () => {
     const f = fixture(true);
     await expect(assertClearingReview({ ...f.env, GITHUB_EVENT_NAME: 'workflow_dispatch' }, f.get, { relay: true }))
-      .rejects.toThrow('only PR runs');
+      .rejects.toThrow('only base-controlled PR target runs');
     await expect(reviewTarget({ ...f.env, SQUAD_REVIEW_HEAD: BASE }, f.get, { relay: true }))
       .rejects.toThrow('head changed');
   });
@@ -246,6 +475,10 @@ describe('independent Squad review guard', () => {
     f.state.comments = [f.comment];
     f.state.comments.push({ ...f.comment, body: `${OVERRIDE_PREFIX}${JSON.stringify({ ...f.override, head_sha: BASE })}` });
     f.run.run_attempt = 2;
+    f.checkRuns[0].output.summary = JSON.stringify({
+      ...JSON.parse(f.checkRuns[0].output.summary),
+      run_attempt: 2,
+    });
     await expect(assertClearingReview(f.env, f.get, { relay: true })).resolves.toEqual(f.verdict);
     expect(f.state.calls.some(route => route.endsWith('/attempts/2/jobs'))).toBe(true);
   });
@@ -325,7 +558,7 @@ describe('independent Squad review guard', () => {
     expect(output.items[0].body).toContain('"result":"REQUEST_CHANGES"');
   });
 
-  it('never mints clearing evidence on a manual run', async () => {
+  it('refuses manual runs before reading or writing review output', async () => {
     const f = fixture();
     f.state.reviews = [];
     const workspace = mkdtempSync(join(tmpdir(), 'squad-review-manual-'));
@@ -334,16 +567,13 @@ describe('independent Squad review guard', () => {
     writeFileSync(path, JSON.stringify({ items: [{
       type: 'submit_pull_request_review', event: 'REQUEST_CHANGES', body: 'Diagnostic.',
     }] }));
-    await enforceReviewOutputs({
+    await expect(enforceReviewOutputs({
       ...f.env, GITHUB_EVENT_NAME: 'workflow_dispatch', GH_AW_AGENT_OUTPUT: path,
-    }, f.get);
-    const output = JSON.parse(readFileSync(path, 'utf8'));
-    expect(output.items[0].event).toBe('COMMENT');
-    expect(output.items[0].body).not.toContain(VERDICT_PREFIX);
-    expect(output.items[0].body).toContain('diagnostic only');
+    }, f.get)).rejects.toThrow('only base-controlled PR target runs');
+    expect(JSON.parse(readFileSync(path, 'utf8')).items[0].body).toBe('Diagnostic.');
   });
 
-  it('deduplicates only a validated existing verdict, never a marker-shaped claim', async () => {
+  it('deduplicates only evidence from the exact run attempt', async () => {
     const f = fixture();
     const workspace = mkdtempSync(join(tmpdir(), 'squad-review-dedup-'));
     workspaces.push(workspace);
@@ -355,6 +585,13 @@ describe('independent Squad review guard', () => {
       type: 'submit_pull_request_review', event: 'COMMENT', body: 'Duplicate.',
     }] }));
     await expect(enforceReviewOutputs(env, f.get)).rejects.toThrow('already has a verdict');
+    f.verdict.run_attempt = 2;
+    f.sync();
+    writeFileSync(path, JSON.stringify({ items: [{
+      type: 'submit_pull_request_review', event: 'COMMENT', body: 'New attempt.',
+    }] }));
+    await expect(enforceReviewOutputs(env, f.get)).resolves.toBeUndefined();
+    expect(readFileSync(path, 'utf8')).toContain('\\"run_attempt\\":1');
     f.review.body = `${VERDICT_PREFIX}{broken`;
     writeFileSync(path, JSON.stringify({ items: [{ type: 'noop' }] }));
     await expect(enforceReviewOutputs(env, f.get)).rejects.toThrow();

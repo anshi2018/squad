@@ -151,7 +151,7 @@ pre-agent-steps:
         node --check "$path" >/dev/null
       }
       # BEGIN GENERATED RESOURCE DIGESTS
-      check_hash "$install_verifier" "a8206bd6f8605915bd284b219a66db623eb2ee09a44a0ac51dd4304aed9d8b57"
+      check_hash "$install_verifier" "4f385df488cc65165e398e499663c015ce63851cb9c938f4c3dd0af38d25f991"
       check_hash "$cast_validator" "0988e04aeef316f4d7a0107c902bbbcf6538b8899b9fffba5f62150717967685"
       check_hash "$bootstrap_validator" "d449b9204f7fad133ff7133c1a30c9381c87e3c0c9d481352819ca93ea1a1dad"
       # END GENERATED RESOURCE DIGESTS
@@ -474,14 +474,46 @@ safe-outputs:
                 || pullRequestDetails.head.repo?.full_name !== provenance.repository) {
                 throw new Error('Trusted bootstrap provenance inputs or Cast PR head identity are invalid.');
               }
-              const provenanceMarker = `<!-- squad:bootstrap-provenance ${JSON.stringify(provenance)} -->`;
+              const provenancePrefix = '<' + '!-- squad:bootstrap-provenance ';
+              const provenanceMarker = `${provenancePrefix}${JSON.stringify(provenance)} -->`;
               const prBodyWithoutProvenance = String(pullRequestDetails.body || payload.pr_body)
-                .replace(/^<!-- squad:bootstrap-provenance .* -->\r?\n?/gm, '');
+                .replace(new RegExp(`^${provenancePrefix}.* -->\\r?\\n?`, 'gm'), '');
               await github.rest.pulls.update({
                 ...context.repo,
                 pull_number: pullRequest.number,
                 body: `${provenanceMarker}\n${prBodyWithoutProvenance}`,
               });
+              const provenanceComments = (await github.paginate(
+                github.rest.issues.listComments,
+                {
+                  ...context.repo,
+                  issue_number: pullRequest.number,
+                  per_page: 100,
+                },
+              )).filter((comment) =>
+                String(comment.body || '').startsWith(provenancePrefix),
+              );
+              if (provenanceComments.length > 1) {
+                throw new Error('Ambiguous bot-authenticated bootstrap provenance comments.');
+              }
+              const provenanceCommentBody =
+                `${provenanceMarker}\nBase-controlled bootstrap provenance. Do not edit this comment.`;
+              if (provenanceComments.length === 1) {
+                if (provenanceComments[0].user?.login !== 'github-actions[bot]') {
+                  throw new Error('Bootstrap provenance comment is not owned by GitHub Actions.');
+                }
+                await github.rest.issues.updateComment({
+                  ...context.repo,
+                  comment_id: provenanceComments[0].id,
+                  body: provenanceCommentBody,
+                });
+              } else {
+                await github.rest.issues.createComment({
+                  ...context.repo,
+                  issue_number: pullRequest.number,
+                  body: provenanceCommentBody,
+                });
+              }
               const finalPayload = {
                 ...payload,
                 issue_body: payload.issue_body.replace('{{CAST_PR_URL}}', pullRequest.url),
