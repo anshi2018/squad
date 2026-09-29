@@ -36,6 +36,7 @@ import {
   WORKFLOW_NAMES,
   checkSource,
   materializeRuntime,
+  normalizeCompiledLock,
   validateContract,
   verifyInstall,
 } from '../workflows/shared/squad-install-verifier.mjs';
@@ -3614,6 +3615,23 @@ describe('gh-aw: canonical package integrity contract', () => {
       'utf8',
     ));
     expect(record.files).toHaveLength(OWNERSHIP_ENTRY_COUNT);
+  });
+
+  it('normalizes only compiler-declared repository-scattered schedules', () => {
+    const metadata = `# gh-aw-metadata: {"frontmatter_hash":"${'a'.repeat(64)}"}`;
+    const lock = [
+      metadata,
+      `source_revision: ${revisionA}`,
+      '      - cron: "17 4 * * 2" # Friendly format: weekly on Tuesday at 04:00 (scattered)',
+      '      - cron: "0 4 * * 2" # Fixed schedule',
+    ].join('\n');
+    const normalized = normalizeCompiledLock(lock, revisionA);
+
+    expect(normalized).toContain(
+      '      - cron: "<repository-scattered>" # Friendly format: weekly on Tuesday at 04:00 (scattered)',
+    );
+    expect(normalized).toContain('      - cron: "0 4 * * 2" # Fixed schedule');
+    expect(normalized).not.toContain(revisionA);
   });
 
   it('accepts only the deterministic retained bootstrap trigger sentinel', () => {

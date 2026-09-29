@@ -350,6 +350,10 @@ export function normalizeCompiledLock(content, revision) {
   if (!metadata) throw new Error('Compiled lock has missing or malformed gh-aw metadata.');
   return text
     .replace(metadata[0], `${metadata[1]}${'0'.repeat(64)}${metadata[3]}`)
+    .replace(
+      /^(\s*-\s+cron:\s+)"[^"]+"(\s+# Friendly format: .+ \(scattered\))$/gm,
+      '$1"<repository-scattered>"$2',
+    )
     .replaceAll(revision, LOCK_REVISION_PLACEHOLDER);
 }
 
@@ -811,6 +815,20 @@ export function materializeRuntime(root) {
 export function writeLocalTestOwnership(root, revision) {
   if (!REVISION_PATTERN.test(revision)) throw new Error('Local test revision must be a lowercase 40-character SHA.');
   const { contract } = parseInstalledContract(root);
+  for (const entry of contract.workflows) {
+    const path = safePath(root, entry.destination);
+    const content = readRequired(root, entry.destination).toString('utf8');
+    const end = content.indexOf('\n---\n', 4);
+    if (!content.startsWith('---\n') || end < 0) {
+      throw new Error(`Installed workflow has invalid frontmatter: ${entry.destination}`);
+    }
+    const frontmatter = content.slice(0, end);
+    const source = `source: bradygaster/squad/${entry.source}@${revision}`;
+    const rebound = /^source:\s*.+$/m.test(frontmatter)
+      ? `${frontmatter.replace(/^source:\s*.+$/m, source)}${content.slice(end)}`
+      : `${frontmatter}\n${source}${content.slice(end)}`;
+    writeFileSync(path, rebound);
+  }
   const files = expectedOwnership(contract).map((entry) => ({
     ...entry,
     sha256: fileDigest(root, entry.destination),
