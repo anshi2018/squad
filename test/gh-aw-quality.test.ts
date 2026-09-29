@@ -15,6 +15,7 @@ import { tmpdir } from 'node:os';
 import { execFileSync, execSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { minimatch } from 'minimatch';
+import { isMap, isSeq, parseDocument, type YAMLMap } from 'yaml';
 import { POSIX_SHELL, NO_POSIX_SHELL_MESSAGE, requirePosixShell } from './posix-shell';
 import { createFirstInstallFixture } from './helpers/gh-aw-install-fixture.js';
 import {
@@ -3515,6 +3516,144 @@ describe('gh-aw: activation roster guard counts only data rows (#1605)', () => {
   });
 });
 
+describe('gh-aw: CI compiler pin contract', () => {
+  const ci = readText(join(process.cwd(), '.github/workflows/squad-ci.yml'));
+  const installs = [
+    {
+      job: 'test',
+      name: 'Install gh-aw extension',
+      commands: [`gh extension install --pin ${MIN_GH_AW_VERSION} github/gh-aw`],
+    },
+    {
+      job: 'gh-aw-compile',
+      name: `Install gh-aw ${MIN_GH_AW_VERSION} (pinned)`,
+      commands: [
+        `gh extension install --force --pin ${MIN_GH_AW_VERSION} github/gh-aw`,
+        `test "$(gh aw --version 2>&1 | awk '{print $NF}')" = ${MIN_GH_AW_VERSION}`,
+      ],
+    },
+  ] as const;
+
+  function assertCompilerPins(source: string): void {
+    const workflow = parseDocument(source);
+    expect(workflow.errors).toEqual([]);
+    const jobs = workflow.get('jobs');
+    if (!isMap(jobs)) throw new Error('CI must define jobs');
+    const installSteps: Array<{ job: unknown; name: unknown; commands: string[] }> = [];
+    for (const { key, value } of jobs.items) {
+      if (!isMap(value)) throw new Error('CI job must be a mapping');
+      const steps = value.get('steps');
+      if (steps === undefined) continue; // Reusable workflow jobs have no steps.
+      if (!isSeq(steps)) throw new Error('CI steps must be a sequence');
+      for (const step of steps.items) {
+        if (!isMap(step)) throw new Error('CI step must be a mapping');
+        const run = step.get('run');
+        if (run === undefined) continue;
+        if (typeof run !== 'string') throw new Error('CI run must be a string');
+        const commands = run.split('\n').map(line => line.replace(
+          /'[^']*'|"(?:\\.|[^"\\])*"|\\.|(^|\s)#.*$/g,
+          (token, comment) => comment === undefined ? token : '',
+        ).trim()).filter(Boolean);
+        const name = step.get('name');
+        // Include named slots even if their install was removed or replaced by output.
+        // Unexpected install-like scripts fail closed; never accept a shell wrapper
+        // merely because it contains the pinned command as a substring.
+        if (installs.some(install => install.name === name) || commands.some(line =>
+          !/^(?:echo|printf)(?:\s+(?:'[^']*'|"[^"$`]*"))+$/.test(line) &&
+          /\bgh\s+(?:extension|ext)\s+install\b.*\bgithub\/gh-aw\b/.test(line))) {
+          installSteps.push({ job: String(key), name, commands });
+        }
+      }
+    }
+    expect(installSteps).toEqual(installs);
+  }
+
+  function mutateInstall(job: string, change: (step: YAMLMap) => void): string {
+    const workflow = parseDocument(ci);
+    const steps = workflow.getIn(['jobs', job, 'steps']);
+    if (!isSeq(steps)) throw new Error(`Missing steps for ${job}`);
+    const name = installs.find(install => install.job === job)?.name;
+    const step = steps.items.find(step => isMap(step) && step.get('name') === name);
+    if (!isMap(step)) throw new Error(`Missing install step for ${job}`);
+    change(step);
+    return workflow.toString();
+  }
+
+  it('pins every CI compiler install to the package minimum gh-aw version', () => {
+    assertCompilerPins(ci);
+  });
+
+  it('ignores YAML comments, shell comment lines, and non-run strings', () => {
+    const workflow = parseDocument(ci);
+    workflow.setIn(['env', 'INSTALL_EXAMPLE'], 'gh extension install github/gh-aw');
+    workflow.addIn(['jobs', 'changes', 'steps'], {
+      name: installs[0].commands[0],
+      run: `echo '${installs[0].commands[0]}'\nprintf "%s" "gh extension install github/gh-aw"`,
+    });
+    const source = mutateInstall('test', step => {
+      step.set('run', `# gh extension install github/gh-aw\n\n${installs[0].commands[0]} # pinned\n`);
+      step.setIn(['env', 'PIN_EXAMPLE'], installs[1].commands[0]);
+    });
+    assertCompilerPins(`# gh extension install github/gh-aw\n${source}`);
+    assertCompilerPins(workflow.toString());
+  });
+
+  describe.each(installs)('$job install step', ({ job, commands }) => {
+    it.each([
+      ['unpinned', 'gh extension install github/gh-aw'],
+      ['wrong version', commands[0].replace(MIN_GH_AW_VERSION, 'v0.0.0')],
+      ['duplicate command', `${commands[0]}\n${commands[0]}`],
+      ['comment-only pin', `# ${commands[0]}\ngh extension install github/gh-aw`],
+      ['inline comment pin', `gh extension install github/gh-aw # ${commands[0]}`],
+      ['echoed pin', `echo "${commands[0]}"`],
+      ['shell wrapper', `bash -c '${commands[0]}'`],
+      ['conditional command', `false && ${commands[0]}`],
+      ['preceding command', `echo preparing\n${commands[0]}`],
+      ['appended command', `${commands[0]}; gh extension install github/gh-aw`],
+      ['heredoc text', `cat <<'INSTALL'\n${commands[0]}\nINSTALL`],
+    ])('rejects %s', (_label, command) => {
+      const source = mutateInstall(job, step => {
+        step.set('run', [command, ...commands.slice(1)].join('\n'));
+      });
+      expect(() => assertCompilerPins(source)).toThrow();
+    });
+
+    it('rejects an install moved to an unexpected step', () => {
+      const source = mutateInstall(job, step => step.set('name', 'Unexpected install'));
+      expect(() => assertCompilerPins(source)).toThrow();
+    });
+
+    it('rejects an install moved to an unexpected job', () => {
+      const workflow = parseDocument(ci);
+      const original = workflow.getIn(['jobs', job]);
+      workflow.deleteIn(['jobs', job]);
+      workflow.setIn(['jobs', 'unexpected-job'], original);
+      expect(() => assertCompilerPins(workflow.toString())).toThrow();
+    });
+
+    it('rejects a missing install step', () => {
+      const source = mutateInstall(job, step => step.delete('run'));
+      expect(() => assertCompilerPins(source)).toThrow();
+    });
+
+    it.each([
+      ['duplicate step', job, commands[0]],
+      ['extra pinned install', 'changes', commands[0]],
+      ['extra unpinned install', 'changes', 'gh extension install github/gh-aw'],
+      ['extra wrapped install', 'changes', `bash -c '${commands[0]}'`],
+      ['extra install after quoted hash', 'changes', `echo "#"; ${commands[0]}`],
+      ['extra install in output substitution', 'changes', `echo "$(${commands[0]})"`],
+    ])('rejects %s', (_label, targetJob, command) => {
+      const workflow = parseDocument(ci);
+      workflow.addIn(['jobs', targetJob, 'steps'], {
+        name: 'Extra install',
+        run: command,
+      });
+      expect(() => assertCompilerPins(workflow.toString())).toThrow();
+    });
+  });
+});
+
 describe('gh-aw: canonical package integrity contract', () => {
   const revisionA = 'a'.repeat(40);
   const revisionB = 'b'.repeat(40);
@@ -3645,16 +3784,6 @@ describe('gh-aw: canonical package integrity contract', () => {
     );
     expect(normalized).toContain('      - cron: "0 4 * * 2" # Fixed schedule');
     expect(normalized).not.toContain(revisionA);
-  });
-
-  it('pins every CI compiler install to the package minimum gh-aw version', () => {
-    const ci = readText(join(process.cwd(), '.github/workflows/squad-ci.yml'));
-    const pins = [...ci.matchAll(
-      /gh extension install(?: --force)? --pin (v[0-9.]+) github\/gh-aw/g,
-    )].map(match => match[1]);
-
-    expect(pins).toHaveLength(2);
-    expect(new Set(pins)).toEqual(new Set([MIN_GH_AW_VERSION]));
   });
 
   it('accepts only the deterministic retained bootstrap trigger sentinel', () => {
