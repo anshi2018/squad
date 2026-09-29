@@ -23,6 +23,8 @@ includes:
     destination: .github/workflows/squad-command-router.md
   - skills/gh-aw-enlistment
 resources:
+  - source: shared/squad-review-guard.mjs
+    destination: .github/workflows/shared/squad-review-guard.mjs
   - source: shared/squad-install-verifier.mjs
     destination: .github/workflows/shared/squad-install-verifier.mjs
   - source: shared/squad-command-contract.mjs

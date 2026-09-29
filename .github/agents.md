@@ -43,15 +43,15 @@ gh aw add "bradygaster/squad/workflows@${SQUAD_SHA}"
 
 This command:
 
-1. Fetches the Squad dispatcher, general and dependency workers, advisory reviewer, retrospective, and approval-gated improvement worker
+1. Fetches the Squad dispatcher, general and dependency workers, independent reviewer with a required-check gate, retrospective, and approval-gated improvement worker
 2. Compiles them into GitHub Actions–compatible workflows
 3. Adds the workflow sources and generated files to your repository's `.github/` directory
 
 ### Verify installation
 
-After running the command, confirm all seven source/lock pairs exist and strict
+After running the command, confirm all eight source/lock pairs exist and strict
 compilation succeeds: Squad, Implement Worker, Review, Deps Worker, Retro and
-Improvement Worker, plus the dedicated Bootstrap workflow. The improvement
+Improvement Worker, plus the dedicated Bootstrap and Command Router workflows. The improvement
 worker is standard but dormant until an exact human approval is relayed through
 the dispatcher. Bootstrap wakes after the installation lands on the default
 branch and creates the linked draft Cast PR and research-proposals issue.

@@ -23,7 +23,7 @@ export const PACKAGE_MANIFEST = 'workflows/aw.yml';
 export const CONTRACT_SOURCE = 'workflows/squad-workflows.manifest.json';
 export const CONTRACT_DESTINATION = '.github/aw/squad-workflows.manifest.json';
 export const MIN_GH_AW_VERSION = 'v0.89.21';
-export const OWNERSHIP_ENTRY_COUNT = 25;
+export const OWNERSHIP_ENTRY_COUNT = 26;
 export const OWNERSHIP_DESTINATION =
   '.github/aw/packages/bradygaster-squad-workflows-3632054824e8.json';
 export const TRIGGER_PROBE = 'shared/squad-bootstrap-trigger-probe.json';
@@ -53,6 +53,7 @@ export const WORKFLOW_TUPLES = deepFreeze([
 ]);
 
 export const RUNTIME_TUPLES = deepFreeze([
+  ['shared/squad-review-guard.mjs', 'workflows/shared/squad-review-guard.mjs', '.github/workflows/shared/squad-review-guard.mjs', '.github/workflows/shared/squad-review-guard.mjs', 'manifest'],
   ['shared/squad-install-verifier.mjs', 'workflows/shared/squad-install-verifier.mjs', '.github/workflows/shared/squad-install-verifier.mjs', '.github/workflows/shared/squad-install-verifier.mjs', 'manifest'],
   ['shared/squad-command-contract.mjs', 'workflows/shared/squad-command-contract.mjs', '.github/workflows/shared/squad-command-contract.mjs', '.github/workflows/shared/squad-command-contract.mjs', 'manifest'],
   ['shared/squad-cast-validator.mjs', 'workflows/shared/squad-cast-validator.mjs', '.github/workflows/shared/squad-cast-validator.mjs', '.github/workflows/shared/squad-cast-validator.mjs', 'manifest'],

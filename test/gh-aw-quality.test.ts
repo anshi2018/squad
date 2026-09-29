@@ -742,6 +742,7 @@ describe('gh-aw: clean install runtime resource closure', () => {
     'shared/squad-install-verifier.mjs',
     'shared/squad-retro-evidence.mjs',
     'shared/squad-retro-provenance.mjs',
+    'shared/squad-review-guard.mjs',
   ];
 
   function runtimeResourceReferences(text: string): string[] {
@@ -793,7 +794,7 @@ describe('gh-aw: clean install runtime resource closure', () => {
     return workflowDir;
   }
 
-  it('emits every shared runtime resource referenced by all seven sources and locks', () => {
+  it('emits every shared runtime resource referenced by all eight sources and locks', () => {
     const workflowDir = createCleanInstalledTarget();
     const references = new Set<string>();
     for (const workflowName of workflowNames) {
@@ -3573,11 +3574,21 @@ describe('gh-aw: canonical package integrity contract', () => {
     return verifyInstall(root).failures;
   }
 
-  it('registers the exact nested 7/15/1 topology and safe trigger probe', () => {
+  it('registers the exact nested 8/17/1 topology and safe trigger probe', () => {
     expect(checkSource(process.cwd())).toEqual([]);
     const contract = JSON.parse(readFileSync(join(process.cwd(), CONTRACT_SOURCE), 'utf8'));
+    const ciRuntimeCount = readText(join(process.cwd(), '.github/workflows/squad-ci.yml')).match(
+      /find \.github\/workflows\/shared -type f ! -name 'squad-bootstrap-trigger-probe\.json' \| wc -l \| tr -d ' '\)" = (\d+)/,
+    );
     expect(contract.workflows.map((entry: { name: string }) => entry.name)).toEqual(WORKFLOW_NAMES);
     expect(contract.shared_runtime).toHaveLength(RUNTIME_TUPLES.length);
+    expect(contract.shared_runtime).toHaveLength(17);
+    expect(ciRuntimeCount?.[1], 'strict compile CI runtime cardinality must match the package manifest')
+      .toBe(String(contract.shared_runtime.length));
+    expect(contract.shared_runtime).toContainEqual(expect.objectContaining({
+      path: 'shared/squad-review-guard.mjs',
+      destination: '.github/workflows/shared/squad-review-guard.mjs',
+    }));
     expect(contract.skills).toHaveLength(SKILL_TUPLES.length);
     expect(contract.package).toBe('bradygaster/squad/workflows');
     expect(contract.manifest).toBe('workflows/aw.yml');
