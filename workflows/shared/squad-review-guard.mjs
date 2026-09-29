@@ -9,6 +9,7 @@ const BOOTSTRAP_WORKFLOW = '.github/workflows/squad-bootstrap.lock.yml';
 const SHA = /^[0-9a-f]{40}$/;
 const ID = /^[a-z][a-z0-9-]*$/;
 const BOT = 'github-actions[bot]';
+const BOT_ID = 41898282;
 const BOOTSTRAP_BRANCH = 'squad/bootstrap-cast';
 const BOOTSTRAP_TITLE = '[squad] Cast your Squad';
 const BOOTSTRAP_AUTHOR = '@squad/base-controlled-bootstrap';
@@ -61,18 +62,24 @@ export function validateAttribution(value, registry, repository, issue) {
 
 export function validateVerdict(value, expected, review, now = Date.now()) {
   requireThat(exactKeys(value, [
-    'schema', 'repository', 'pull_request', 'head_sha', 'author_agent', 'reviewer_agent',
-    'result', 'timestamp', 'run_id', 'run_attempt', 'event',
+    'schema', 'repository', 'pull_request', 'base_sha', 'head_sha', 'author_agent',
+    'reviewer_agent', 'result', 'timestamp', 'run_id', 'run_attempt', 'event',
+    'workflow_path',
   ]) && value.schema === 'squad-review-verdict/v1', 'invalid verdict shape');
-  for (const key of ['repository', 'pull_request', 'head_sha', 'author_agent', 'reviewer_agent']) {
+  for (const key of [
+    'repository', 'pull_request', 'base_sha', 'head_sha', 'author_agent', 'reviewer_agent',
+  ]) {
     requireThat(value[key] === expected[key], `verdict ${key} mismatch`);
   }
-  requireThat(SHA.test(value.head_sha) && value.author_agent !== value.reviewer_agent,
+  requireThat(SHA.test(value.base_sha) && SHA.test(value.head_sha) &&
+    value.author_agent !== value.reviewer_agent,
     'invalid SHA or self review');
   requireThat(['COMMENT', 'REQUEST_CHANGES'].includes(value.result) &&
     value.event === 'pull_request' && Number.isSafeInteger(value.run_id) && value.run_id > 0 &&
-    Number.isSafeInteger(value.run_attempt) && value.run_attempt > 0, 'invalid verdict result or run');
-  requireThat(review.user?.login === BOT && review.commit_id === value.head_sha &&
+    Number.isSafeInteger(value.run_attempt) && value.run_attempt > 0 &&
+    value.workflow_path === WORKFLOW, 'invalid verdict result or run');
+  requireThat(review.user?.login === BOT && review.user?.id === BOT_ID &&
+    review.user?.type === 'Bot' && review.commit_id === value.head_sha &&
     review.state === 'COMMENTED',
   'review author, commit, or native result mismatch');
   const issued = timestamp(value.timestamp);
@@ -250,7 +257,7 @@ export async function reviewTarget(
     attribution = validateAttribution(value, registry, repository, issue ?? value?.issue);
   }
   return {
-    repository, pull_request: number, head_sha: pr.head.sha,
+    repository, pull_request: number, base_sha: pr.base.sha, head_sha: pr.head.sha,
     author_agent: attribution.author_agent, reviewer_agent: attribution.reviewer_agent, pr,
   };
 }
@@ -265,15 +272,19 @@ async function currentEvidence(target, get) {
 }
 
 export async function enforceReviewOutputs(env, get, options = {}) {
-  requireThat(['pull_request', 'workflow_dispatch'].includes(env.GITHUB_EVENT_NAME), 'invalid event');
+  requireThat(env.GITHUB_EVENT_NAME === 'pull_request', 'only PR runs can emit review output');
   const target = await reviewTarget(env, get, options);
   const output = JSON.parse(readFileSync(env.GH_AW_AGENT_OUTPUT, 'utf8'));
   requireThat(Array.isArray(output.items), 'missing safe-output items');
   const verdicts = output.items.filter(item => item.type === 'submit_pull_request_review');
   const existing = await currentEvidence(target, get);
-  requireThat(existing.length <= 1, 'duplicate verdict evidence');
-  if (existing.length === 1) {
-    validateVerdict(record(existing[0].body, VERDICT_PREFIX), target, existing[0]);
+  const currentRun = existing.filter(review => {
+    const verdict = validateVerdict(record(review.body, VERDICT_PREFIX), target, review);
+    return String(verdict.run_id) === env.GITHUB_RUN_ID &&
+      String(verdict.run_attempt) === env.GITHUB_RUN_ATTEMPT;
+  });
+  requireThat(currentRun.length <= 1, 'duplicate verdict evidence for this run');
+  if (currentRun.length === 1) {
     requireThat(verdicts.length === 0, 'unchanged head already has a verdict');
     return;
   }
@@ -282,17 +293,11 @@ export async function enforceReviewOutputs(env, get, options = {}) {
   requireThat(['COMMENT', 'REQUEST_CHANGES'].includes(item.event) &&
     typeof item.body === 'string' && !item.body.includes('Squad-Review-Verdict') &&
     !item.body.includes('Squad-Review-Override'), 'invalid review output');
-  // Manual runs remain useful review diagnostics, but never mint clearing evidence.
-  if (env.GITHUB_EVENT_NAME === 'workflow_dispatch') {
-    item.body += `\n\nManual Squad verdict: ${item.event} (diagnostic only).`;
-    item.event = 'COMMENT';
-    writeFileSync(env.GH_AW_AGENT_OUTPUT, JSON.stringify(output));
-    return;
-  }
   const value = {
     schema: 'squad-review-verdict/v1',
     repository: target.repository,
     pull_request: target.pull_request,
+    base_sha: target.base_sha,
     head_sha: target.head_sha,
     author_agent: target.author_agent,
     reviewer_agent: target.reviewer_agent,
@@ -301,6 +306,7 @@ export async function enforceReviewOutputs(env, get, options = {}) {
     run_id: Number(env.GITHUB_RUN_ID),
     run_attempt: Number(env.GITHUB_RUN_ATTEMPT),
     event: 'pull_request',
+    workflow_path: WORKFLOW,
   };
   requireThat(Number.isSafeInteger(value.run_id) && value.run_id > 0 &&
     Number.isSafeInteger(value.run_attempt) && value.run_attempt > 0, 'invalid workflow identity');
@@ -320,11 +326,21 @@ export async function assertClearingReview(env, get, options = {}) {
     ...options,
     requireBootstrapRunSuccess: true,
   });
-  const candidates = await currentEvidence(target, get);
-  requireThat(candidates.length === 1, 'missing or duplicate verdict evidence');
-  const review = candidates[0];
+  const candidates = (await currentEvidence(target, get)).map(review => ({
+    review,
+    verdict: validateVerdict(
+      record(review.body, VERDICT_PREFIX),
+      target,
+      review,
+      relay ? timestamp(target.pr.merged_at) : Date.now(),
+    ),
+  }));
+  const bound = relay ? candidates : candidates.filter(({ verdict }) =>
+    String(verdict.run_id) === env.GITHUB_RUN_ID &&
+    String(verdict.run_attempt) === env.GITHUB_RUN_ATTEMPT);
+  requireThat(bound.length === 1, 'missing or duplicate verdict evidence for this run');
+  const { review, verdict } = bound[0];
   const cutoff = relay ? timestamp(target.pr.merged_at) : Date.now();
-  const verdict = validateVerdict(record(review.body, VERDICT_PREFIX), target, review, cutoff);
   const run = await get(`repos/${target.repository}/actions/runs/${verdict.run_id}`);
   requireThat(run.event === 'pull_request' && run.path === WORKFLOW &&
     run.repository?.full_name === target.repository && run.head_sha === target.head_sha &&
@@ -334,12 +350,12 @@ export async function assertClearingReview(env, get, options = {}) {
     (run.pull_requests.length === 0 || run.pull_requests.some(pr => pr.number === target.pull_request &&
       pr.head?.sha === target.head_sha && pr.base?.repo?.name === target.pr.base.repo.name)),
   'verdict is not bound to this PR workflow run');
-  requireThat(relay || String(verdict.run_id) === env.GITHUB_RUN_ID ||
-    (run.status === 'completed' && run.conclusion === 'success'),
-  'rerun the original PR review workflow to clear its failed verdict');
   const attempt = run.run_attempt === verdict.run_attempt ? run :
     await get(`repos/${target.repository}/actions/runs/${verdict.run_id}/attempts/${verdict.run_attempt}`);
-  requireThat(attempt.run_attempt === verdict.run_attempt &&
+  requireThat(attempt.event === 'pull_request' && attempt.path === WORKFLOW &&
+    attempt.repository?.full_name === target.repository &&
+    attempt.head_sha === target.head_sha &&
+    attempt.run_attempt === verdict.run_attempt &&
     timestamp(attempt.run_started_at) <= timestamp(verdict.timestamp) &&
     (attempt.status !== 'completed' ||
       timestamp(review.submitted_at) <= timestamp(attempt.updated_at)), 'verdict outside workflow run');

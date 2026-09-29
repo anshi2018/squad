@@ -448,7 +448,7 @@ Use this checklist for the initial bootstrap and after any workflow update:
 | Cast persistence | Review the Cast PR before merging | The PR contains `.squad/casting/policy.json`, `registry.json`, and `history.json`, plus the team, routing, charters, Copilot agent, and `meet-the-squad.md` |
 | Research backlog | Follow the proposal issue through research, triage, plan, and activate | The journey ends with assignable implementation issues; `/squad implement` is used only on those generated tasks |
 | Cast checks | Open the linked Cast PR and inspect its checks; if application CI is `action_required`, approve that workflow run and wait for it to finish | Copilot review and the repository's normal build, test, lint, and security checks complete before merge |
-| Handoffs | Run `/squad implement` on a ready issue, then review its PR | The dispatcher starts the appropriate isolated worker; automatic PR review supplies the independent current-head verdict; manual `/squad review` is diagnostic |
+| Handoffs | Run `/squad implement` on a ready issue, then review its PR | The dispatcher starts the appropriate isolated worker; automatic PR review supplies the independent current-head verdict; `/squad review` explains how to rerun that exact automatic check |
 | Rerun | Repeat the same command after a cancellation or uncertain result | Existing Cast and implementation PRs are detected instead of duplicated; an unchanged reviewed head is not reviewed twice |
 | Recovery | Fix the named failing activation step, then use **Re-run failed jobs**; for an interrupted command, rerun the identical `/squad` command | Activation uploads no partial state artifact, and command-specific idempotency resumes from GitHub's committed PR, issue, comment, and review state |
 
@@ -497,7 +497,7 @@ wins: `/squad plan accept scope` is not treated as `/squad plan`.
 | Activation | `/squad plan activate` | Create GitHub issues from an accepted plan | Terminal step; creates real GitHub issues |
 | Activation | `/squad plan activate phase {N}` | Create GitHub issues for only Phase N | Use when accept didn't auto-activate |
 | Implementation | `/squad implement` | Implement an issue, or start the next ready wave of an epic | Dispatches an isolated implementation worker |
-| Review | `/squad review` | Independently review the current pull request | Advisory `COMMENT` or `REQUEST_CHANGES`; human approval remains mandatory |
+| Review | `/squad review` | Show how to rerun the current pull request's automatic independent review | Does not dispatch branch-selected code; human approval remains mandatory |
 | Retrospective | `/squad retro` | Run the shared retrospective immediately | Authorized manual run; weekly and evidence-driven wakeups use the same durable gate |
 | Governance | `/squad approve-improvement` | Request implementation of an exact retrospective proposal revision | Human write/maintain/admin permission, `Approved-Revision:` hash and exact `Approved-Path:` lines; dispatcher relays nested `issue_number` and `approval_comment_id`, never approval authority |
 | Governance | `/squad revoke-improvement` | Withdraw a prior `/squad approve-improvement` | Reserved, read-only command available to any actor; emits no output of any kind — the comment itself is the record that later runs re-check |
@@ -1446,14 +1446,12 @@ The implementation worker performs an internal self-review before opening a PR:
 5. **Protected-file guard** — changes to protected paths trigger a review request on the PR rather than a direct commit
 
 After the PR is opened, `squad-review` provides an independent review.
-You can start it in either of these ways:
-
-- **Manual:** Comment `/squad review` on a same-repository pull request. The main
-  Squad router relays the pull request number, current head SHA, and manual
-  origin to the isolated reviewer workflow.
-- **Automatic:** Every same-repository pull request triggers review on `opened`,
-  `reopened`, `ready_for_review` and `synchronize`. Fork pull requests are
-  refused. Only a PR-triggered run can publish the required check.
+Every same-repository pull request triggers review on `opened`, `reopened`,
+`ready_for_review` and `synchronize`; fork pull requests are refused. The
+workflow has no `workflow_dispatch` trigger, so a contributor-selected ref
+cannot execute reviewer code or safe-output handlers. Comment `/squad review`
+to receive instructions for opening the existing `Squad Review / review` run
+for the current head and using GitHub's **Re-run jobs** action.
 
 The reviewer classifies provenance in this priority order:
 
@@ -1533,8 +1531,9 @@ error; it never dispatches the next wave.
 
 The stable literal check name is **`Squad Review / review`**.
 `inlined-imports: true` makes the compiled job directly addressable.
-Manual `/squad review` runs use `Squad Review / manual`; they cannot satisfy
-the PR check or clear relay evidence.
+There is no manual reviewer run. `/squad review` only explains how to rerun the
+existing automatic PR run, and only that exact run ID and attempt can satisfy
+its emitted verdict and check.
 
 Brady (or the consumer repository administrator) must install/merge the complete
 generated bundle through the explicit human installation boundary, then observe

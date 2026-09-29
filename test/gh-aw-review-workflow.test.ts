@@ -91,7 +91,10 @@ function assertReviewerContract(workflow: string): void {
   expect(submitReview).not.toContain('APPROVE');
   expect(concurrency).toContain('cancel-in-progress: true');
   expect(trigger).not.toMatch(/^\s+forks:/m);
+  expect(trigger).not.toContain('workflow_dispatch:');
   expect(yaml).toContain('github.event.pull_request.head.repo.full_name == github.repository');
+  expect(yaml).not.toContain('github.workflow_sha');
+  expect(yaml).not.toContain('github.event.inputs');
   expect(workflow).toContain('Squad-Review-Head: {40-character lowercase head SHA}');
   expect(rows).toEqual([
     '1:One validated durable worker marker:Squad-authored',
@@ -147,9 +150,9 @@ afterAll(() => {
 function assertCompiledGate(lock: string): void {
   const workflow = parse(lock);
   const { jobs } = workflow;
-  expect(workflow['run-name']).toBe('Squad review — PR #${{ github.event.inputs.issue_number || github.event.pull_request.number }}');
+  expect(workflow['run-name']).toBe('Squad review — PR #${{ github.event.pull_request.number }}');
   const review = jobs.review;
-  expect(review.name).toBe("${{ github.event_name == 'pull_request' && 'Squad Review / review' || 'Squad Review / manual' }}");
+  expect(review.name).toBe('Squad Review / review');
   expect(review.if).toBe('always()');
   expect(review.needs).toEqual(expect.arrayContaining(['agent', 'safe_outputs']));
   const execution = review.steps.find((step: { name: string }) => step.name === 'Require successful PR review execution');
@@ -167,7 +170,7 @@ function assertCompiledGate(lock: string): void {
   expect(steps[guard]['continue-on-error']).toBeUndefined();
   const baseCheckout = steps.find((step: { name: string }) =>
     step.name === 'Checkout base commit for review guard');
-  expect(baseCheckout.with.ref).toBe('${{ github.event.pull_request.base.sha || github.workflow_sha }}');
+  expect(baseCheckout.with.ref).toBe('${{ github.event.pull_request.base.sha }}');
   expect(steps.some((step: { name: string }) =>
     step.name.includes('workflow commit'))).toBe(false);
   expect(steps[guard].with.script).toContain('!existsSync(baseGuard) || !existsSync(baseManifest)');
@@ -207,8 +210,9 @@ async function executeCompiledGuardLoader(
   {
     baseGuard,
     baseManifest = false,
+    dispatchGuard,
     head = 'a'.repeat(40),
-  }: { baseGuard?: string; baseManifest?: boolean; head?: string },
+  }: { baseGuard?: string; baseManifest?: boolean; dispatchGuard?: string; head?: string },
 ): Promise<string> {
   const workspace = mkdtempSync(resolve(ROOT, '.squad-review-loader-'));
   compileWorkspaces.push(workspace);
@@ -227,6 +231,17 @@ async function executeCompiledGuardLoader(
     );
     mkdirSync(dirname(path), { recursive: true });
     writeFileSync(path, '{}\n');
+  }
+  if (dispatchGuard !== undefined) {
+    const path = resolve(
+      workspace,
+      '.github',
+      'workflows',
+      'shared',
+      'squad-review-guard.mjs',
+    );
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, dispatchGuard);
   }
   const previousWorkspace = process.env.GITHUB_WORKSPACE;
   const previousOutput = process.env.SQUAD_TEST_GUARD_OUTPUT;
@@ -255,32 +270,23 @@ async function executeCompiledGuardLoader(
 }
 
 describe('gh-aw enforcing Squad reviewer', () => {
-  it('routes /squad review to the isolated workflow and supports automatic PR events', () => {
+  it('keeps review automatic and makes /squad review a non-dispatching rerun guide', () => {
     const routerDispatch = yamlBlock(ROUTER_FRONTMATTER, 'dispatch-workflow');
     const reviewTrigger = yamlBlock(REVIEWER_FRONTMATTER, 'on');
     const relay = ROUTER.match(/## skill: `squad-review-relay`([\s\S]*?)(?=\n## skill:)/)?.[1] ?? '';
-    const relayPayload = JSON.parse(relay.match(/```json\n([\s\S]*?)\n```/)?.[1] ?? '{}') as {
-      workflow_name?: string;
-      inputs?: Record<string, string>;
-      issue_number?: string;
-    };
 
-    expect(listInBlock(routerDispatch, 'workflows')).toContain('squad-review');
+    expect(listInBlock(routerDispatch, 'workflows')).not.toContain('squad-review');
+    expect(ROUTER_FRONTMATTER).toContain('actions: read');
     expect(ROUTER).toContain('| `/squad review` | Review Relay |');
     expect(REVIEWER).not.toContain('slash_command:');
-    expect(reviewTrigger).toMatch(/workflow_dispatch:\n\s+inputs:/);
     expect(reviewTrigger).toMatch(/pull_request:\n\s+types: \[opened, reopened, ready_for_review, synchronize\]/);
-    expect(relayPayload).toEqual({
-      workflow_name: 'squad-review',
-      inputs: {
-        issue_number: '{pull-request-number}',
-        expected_head_sha: '{current-head-sha}',
-        request_origin: 'manual',
-      },
-    });
-    expect(relayPayload.issue_number).toBeUndefined();
-    expect(relay).not.toContain('"pr_number"');
-    expect(relay).toContain('Never call the generic');
+    expect(reviewTrigger).not.toContain('workflow_dispatch:');
+    expect(relay).toContain('.github/workflows/squad-review.lock.yml');
+    expect(relay).toContain('exact current head');
+    expect(relay).toContain('require exactly one job named `Squad Review / review`');
+    expect(relay).toContain('This command did not rerun it.');
+    expect(relay).toContain('no automatic review run exists for the exact head');
+    expect(relay).not.toContain('dispatch-workflow');
   });
 
   it('limits slash commands to issue and pull request conversation surfaces', () => {
@@ -392,13 +398,13 @@ describe('gh-aw enforcing Squad reviewer', () => {
     const concurrency = yamlBlock(REVIEWER_FRONTMATTER, 'concurrency');
 
     expect(concurrency).toContain(
-      'group: "squad-review-${{ github.event.inputs.issue_number || github.event.pull_request.number || github.run_id }}"',
+      'group: "squad-review-${{ github.event.pull_request.number }}"',
     );
     expect(concurrency).toContain('cancel-in-progress: true');
     expect(REVIEWER_FRONTMATTER).not.toMatch(/^\s+forks:/m);
     expect(REVIEWER).toContain('If an existing bot review contains a `Squad-Review-Verdict:` record');
-    expect(REVIEWER).toContain('Never re-review an unchanged head');
-    expect(REVIEWER).toContain('Re-fetch the pull request immediately before emitting');
+    expect(REVIEWER).toContain('Evidence from a different run or attempt cannot deduplicate');
+    expect(REVIEWER).toMatch(/Re-fetch the pull request\s+immediately before emitting/);
   });
 
   it('covers acceptance, routing, protected files, tests, and changesets', () => {
@@ -431,7 +437,7 @@ describe('gh-aw enforcing Squad reviewer', () => {
     expect(safeOutputs.submit_pull_request_review).toMatchObject({
       max: 1,
       allowed_events: ['COMMENT', 'REQUEST_CHANGES'],
-      commit_id: '${{ github.event.pull_request.head.sha || github.event.inputs.expected_head_sha }}',
+      commit_id: '${{ github.event.pull_request.head.sha }}',
     });
     expect(safeOutputs).not.toHaveProperty('dispatch_workflow');
     expect(safeOutputs).not.toHaveProperty('create_issue');
@@ -460,12 +466,14 @@ describe('gh-aw enforcing Squad reviewer', () => {
         ? 'edd6fbf0f84334ff086ed2bc8bbfed5503fdd56f'
         : '9a898b5182ca432b62bef26dbf1f9022dd1d256b';
       await expect(executeCompiledGuardLoader(script, {
+        dispatchGuard: stub('dispatch-ref'),
         head,
       })).rejects.toThrow('First-install manual boundary');
 
       await expect(executeCompiledGuardLoader(script, {
         baseGuard: stub('base'),
         baseManifest: true,
+        dispatchGuard: stub('dispatch-ref'),
         head,
       })).resolves.toBe(JSON.stringify({
         source: 'base',
@@ -517,6 +525,14 @@ describe('gh-aw enforcing Squad reviewer', () => {
       REVIEWER.replace('invalid provenance. Fail closed with', 'invalid provenance. Continue with'),
       REVIEWER.replace('Every same-repository PR (including', 'Some PRs (including'),
       REVIEWER.replace('inlined-imports: true', 'inlined-imports: false'),
+      REVIEWER.replace(
+        'on:\n  pull_request:',
+        'on:\n  workflow_dispatch:\n  pull_request:',
+      ),
+      REVIEWER.replace(
+        'ref: ${{ github.event.pull_request.base.sha }}',
+        'ref: ${{ github.workflow_sha }}',
+      ),
       REVIEWER.replaceAll('Squad-Review-Head: {40-character lowercase head SHA}', 'Reviewed head SHA'),
     ];
 
@@ -530,7 +546,7 @@ describe('gh-aw enforcing Squad reviewer', () => {
     const mutations = [
       REVIEWER.replace('await guard.enforceReviewOutputs', 'void guard.enforceReviewOutputs'),
       REVIEWER.replace('await guard.assertClearingReview', 'void guard.assertClearingReview'),
-      REVIEWER.replace("&& 'Squad Review / review'", "&& 'Other check'"),
+      REVIEWER.replace('    name: Squad Review / review', '    name: Other check'),
       REVIEWER.replace('pathToFileURL(baseGuard)', "pathToFileURL('.squad-review-workflow/guard.mjs')"),
       REVIEWER.replace('No trusted Squad verdict was emitted.', 'Squad-Review-Verdict: trusted'),
       REVIEWER.replace('    if: always()\n', '    if: success()\n'),

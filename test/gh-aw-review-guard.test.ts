@@ -52,11 +52,12 @@ function fixture(relay = false) {
   };
   const verdict = {
     schema: 'squad-review-verdict/v1', repository: REPOSITORY, pull_request: 42,
-    head_sha: HEAD, author_agent: 'implementer', reviewer_agent: 'reviewer',
+    base_sha: BASE, head_sha: HEAD, author_agent: 'implementer', reviewer_agent: 'reviewer',
     result: 'COMMENT', timestamp: ISSUED, run_id: 17, run_attempt: 1, event: 'pull_request',
+    workflow_path: '.github/workflows/squad-review.lock.yml',
   };
   const review = {
-    id: 123, user: { login: 'github-actions[bot]' }, commit_id: HEAD,
+    id: 123, user: { login: 'github-actions[bot]', id: 41898282, type: 'Bot' }, commit_id: HEAD,
     state: 'COMMENTED', submitted_at: SUBMITTED,
     body: '',
   };
@@ -270,11 +271,13 @@ describe('independent Squad review guard', () => {
 
   it.each([
     ['schema', 'other'], ['repository', 'other/repo'], ['pull_request', 41],
-    ['head_sha', BASE], ['author_agent', 'reviewer'], ['reviewer_agent', 'implementer'],
+    ['base_sha', HEAD], ['head_sha', BASE], ['author_agent', 'reviewer'],
+    ['reviewer_agent', 'implementer'],
     ['result', 'APPROVE'], ['result', ''], ['timestamp', 'bad'],
     ['timestamp', '2026-09-28T12:05:00Z'], ['timestamp', '2026-09-28T11:00:00Z'],
     ['timestamp', '2026-02-30T12:01:00Z'],
     ['run_id', 0], ['run_id', '17'], ['run_attempt', 0], ['event', 'workflow_dispatch'],
+    ['workflow_path', '.github/workflows/attacker.yml'],
   ])('refuses verdict mutation %s=%s at the real relay', async (key, value) => {
     const f = fixture(true);
     Object.assign(f.verdict, { [key]: value });
@@ -300,6 +303,7 @@ describe('independent Squad review guard', () => {
     'failed-run', 'failed-check', 'missing-check', 'duplicate-check', 'wrong-check',
     'manual-run', 'wrong-workflow', 'wrong-run-repo', 'wrong-run-sha', 'wrong-run-pr',
     'wrong-run-attempt', 'wrong-run-title', 'verdict-before-run',
+    'wrong-bot-id', 'wrong-bot-type',
   ])('fails closed for %s', async mutation => {
     const f = fixture(true);
     switch (mutation) {
@@ -337,6 +341,8 @@ describe('independent Squad review guard', () => {
       case 'wrong-run-attempt': f.run.run_attempt = 0; break;
       case 'wrong-run-title': f.run.display_title = 'Squad review \u2014 PR #43'; break;
       case 'verdict-before-run': f.run.run_started_at = FINISHED; break;
+      case 'wrong-bot-id': f.review.user.id = 1; break;
+      case 'wrong-bot-type': f.review.user.type = 'User'; break;
     }
     await expect(assertClearingReview(f.env, f.get, { relay: true })).rejects.toThrow();
   });
@@ -444,7 +450,7 @@ describe('independent Squad review guard', () => {
     expect(output.items[0].body).toContain('"result":"REQUEST_CHANGES"');
   });
 
-  it('never mints clearing evidence on a manual run', async () => {
+  it('refuses manual runs before reading or writing review output', async () => {
     const f = fixture();
     f.state.reviews = [];
     const workspace = mkdtempSync(join(tmpdir(), 'squad-review-manual-'));
@@ -453,16 +459,13 @@ describe('independent Squad review guard', () => {
     writeFileSync(path, JSON.stringify({ items: [{
       type: 'submit_pull_request_review', event: 'REQUEST_CHANGES', body: 'Diagnostic.',
     }] }));
-    await enforceReviewOutputs({
+    await expect(enforceReviewOutputs({
       ...f.env, GITHUB_EVENT_NAME: 'workflow_dispatch', GH_AW_AGENT_OUTPUT: path,
-    }, f.get);
-    const output = JSON.parse(readFileSync(path, 'utf8'));
-    expect(output.items[0].event).toBe('COMMENT');
-    expect(output.items[0].body).not.toContain(VERDICT_PREFIX);
-    expect(output.items[0].body).toContain('diagnostic only');
+    }, f.get)).rejects.toThrow('only PR runs');
+    expect(JSON.parse(readFileSync(path, 'utf8')).items[0].body).toBe('Diagnostic.');
   });
 
-  it('deduplicates only a validated existing verdict, never a marker-shaped claim', async () => {
+  it('deduplicates only evidence from the exact run attempt', async () => {
     const f = fixture();
     const workspace = mkdtempSync(join(tmpdir(), 'squad-review-dedup-'));
     workspaces.push(workspace);
@@ -474,6 +477,13 @@ describe('independent Squad review guard', () => {
       type: 'submit_pull_request_review', event: 'COMMENT', body: 'Duplicate.',
     }] }));
     await expect(enforceReviewOutputs(env, f.get)).rejects.toThrow('already has a verdict');
+    f.verdict.run_attempt = 2;
+    f.sync();
+    writeFileSync(path, JSON.stringify({ items: [{
+      type: 'submit_pull_request_review', event: 'COMMENT', body: 'New attempt.',
+    }] }));
+    await expect(enforceReviewOutputs(env, f.get)).resolves.toBeUndefined();
+    expect(readFileSync(path, 'utf8')).toContain('\\"run_attempt\\":1');
     f.review.body = `${VERDICT_PREFIX}{broken`;
     writeFileSync(path, JSON.stringify({ items: [{ type: 'noop' }] }));
     await expect(enforceReviewOutputs(env, f.get)).rejects.toThrow();

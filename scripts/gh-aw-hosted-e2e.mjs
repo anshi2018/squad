@@ -38,6 +38,7 @@ const RESEARCH_ISSUE_TITLE = '[Research Proposals] Agent-discovered repo opportu
 const RESEARCH_MARKER = '<!-- squad:bootstrap-opportunities schema=1 -->';
 const PROVENANCE_MARKER_PATTERN = /^<!-- squad:bootstrap-provenance (\{[^\r\n]+\}) -->$/gm;
 const ACTIONS_BOT_LOGIN = 'github-actions[bot]';
+const ACTIONS_BOT_ID = 41898282;
 const SAFE_CHILD_ENV = Object.freeze([
   'CI',
   'GH_CONFIG_DIR',
@@ -584,6 +585,8 @@ function waitForBaseControlledReviewCanary(target, castPr, evidence) {
     ]);
     const verdicts = reviews.filter((review) =>
       review.user?.login === ACTIONS_BOT_LOGIN &&
+      review.user?.id === ACTIONS_BOT_ID &&
+      review.user?.type === 'Bot' &&
       review.commit_id === castPr.headSha &&
       String(review.body ?? '').includes('Squad-Review-Verdict:'));
     if (verdicts.length > 1) {
@@ -603,10 +606,13 @@ function waitForBaseControlledReviewCanary(target, castPr, evidence) {
       if (verdict.schema !== 'squad-review-verdict/v1'
         || verdict.repository !== target
         || verdict.pull_request !== castPr.number
+        || verdict.base_sha !== castPr.baseSha
         || verdict.head_sha !== castPr.headSha
         || verdict.author_agent !== '@squad/base-controlled-bootstrap'
         || verdict.reviewer_agent !== '@squad/base-controlled-review'
-        || verdict.result !== 'COMMENT') {
+        || verdict.result !== 'COMMENT'
+        || verdict.event !== 'pull_request'
+        || verdict.workflow_path !== '.github/workflows/squad-review.lock.yml') {
         throw new Error('Squad Review canary verdict is not bound to the base-controlled bootstrap activation.');
       }
       writeJson(resolve(evidence, 'base-controlled-review-canary.json'), {

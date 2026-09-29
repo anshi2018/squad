@@ -14,8 +14,8 @@
       "source": "workflows/package/squad.md",
       "destination": ".github/workflows/squad.md",
       "lock": ".github/workflows/squad.lock.yml",
-      "source_sha256": "17d7b124e5d3f06d8c1ea67a7330366b40f3e69d2209e8477fe4fa38a1ae38b0",
-      "lock_sha256": "c8f1375aab790ef9ca7531fabdc5a80423865e3981db127b6e2cb994d32b7e87"
+      "source_sha256": "68110664fa20d4efbee19fd75bb8f2406f1cbfcb1df3dddeb2419251a5355d17",
+      "lock_sha256": "2195655666fb474ba57d8729aef822b77e501e35deebb96b3d121875311eeaa5"
     },
     {
       "name": "squad-implement-worker",
@@ -30,8 +30,8 @@
       "source": "workflows/package/squad-review.md",
       "destination": ".github/workflows/squad-review.md",
       "lock": ".github/workflows/squad-review.lock.yml",
-      "source_sha256": "ff7cbcf07cb4ef3cb9cca40dc4f4f4d5ae0796172c7ea07d2902a1d733bf8f70",
-      "lock_sha256": "6429829963430903ebeb616b82341d708e6af4282a05af32df3c013d5704b311"
+      "source_sha256": "8ffefbf5b0b16b0623612446790bb3e0ca7c9b89de674e81b7e95ac9e008c0fd",
+      "lock_sha256": "5d0ee03e894805eb63aaa8258ddc447f3e734d2d8a18ff3f89a12d418a722b90"
     },
     {
       "name": "squad-deps-worker",
@@ -81,7 +81,7 @@
       "package_destination": ".github/workflows/shared/squad-review-guard.mjs",
       "destination": ".github/workflows/shared/squad-review-guard.mjs",
       "ownership": "manifest",
-      "sha256": "277003226e699bc3de3b3072a64016155d3fc047ac3759dd90624b25b0cc07fa"
+      "sha256": "2a18ddd8a57c255e966ad2a1baa211f7d07277b1b4a15738a8dfb1211a67e18a"
     },
     {
       "path": "shared/squad-install-verifier.mjs",

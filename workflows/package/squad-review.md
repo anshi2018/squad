@@ -1,31 +1,17 @@
 ---
 name: Squad Review
-run-name: "Squad review — PR #${{ github.event.inputs.issue_number || github.event.pull_request.number }}"
+run-name: "Squad review — PR #${{ github.event.pull_request.number }}"
 description: Independently reviews agent-authored pull requests without editing or remediating
 private: false
 inlined-imports: true
 on:
-  workflow_dispatch:
-    inputs:
-      issue_number:
-        description: Pull request number to review
-        required: true
-        type: string
-      expected_head_sha:
-        description: Pull request head SHA observed by the /squad review relay
-        required: true
-        type: string
-      request_origin:
-        description: Review request origin
-        required: true
-        type: string
   pull_request:
     types:
       - opened
       - reopened
       - ready_for_review
       - synchronize
-if: github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
+if: github.event.pull_request.head.repo.full_name == github.repository
 permissions:
   contents: read
   copilot-requests: write
@@ -33,9 +19,8 @@ permissions:
   pull-requests: read
   actions: read
 concurrency:
-  group: squad-review-${{ github.event.inputs.issue_number || github.event.pull_request.number || github.run_id }}
+  group: squad-review-${{ github.event.pull_request.number }}
   cancel-in-progress: true
-  job-discriminator: ${{ github.run_id }}
 network:
   allowed:
     - defaults
@@ -53,15 +38,15 @@ safe-outputs:
     - name: Checkout base commit for review guard
       uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       with:
-        ref: ${{ github.event.pull_request.base.sha || github.workflow_sha }}
+        ref: ${{ github.event.pull_request.base.sha }}
         persist-credentials: false
         path: .squad-review-base
     - name: Bind review output to committed agent identities and current head
       uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3
       env:
         GH_AW_AGENT_OUTPUT: ${{ steps.setup-agent-output-env.outputs.GH_AW_AGENT_OUTPUT }}
-        SQUAD_REVIEW_PR: ${{ github.event.pull_request.number || github.event.inputs.issue_number }}
-        SQUAD_REVIEW_HEAD: ${{ github.event.pull_request.head.sha || github.event.inputs.expected_head_sha }}
+        SQUAD_REVIEW_PR: ${{ github.event.pull_request.number }}
+        SQUAD_REVIEW_HEAD: ${{ github.event.pull_request.head.sha }}
       with:
         script: |
           const { existsSync } = require('node:fs');
@@ -80,20 +65,20 @@ safe-outputs:
             async (route, fields) => (await github.request(`GET /${route}`, fields)).data);
   add-comment:
     max: 1
-    target: ${{ github.event.inputs.issue_number || github.event.pull_request.number }}
+    target: ${{ github.event.pull_request.number }}
   create-pull-request-review-comment:
     max: 10
-    target: ${{ github.event.inputs.issue_number || github.event.pull_request.number }}
+    target: ${{ github.event.pull_request.number }}
   submit-pull-request-review:
     max: 1
-    target: ${{ github.event.inputs.issue_number || github.event.pull_request.number }}
+    target: ${{ github.event.pull_request.number }}
     allowed-events:
       - COMMENT
       - REQUEST_CHANGES
-    commit-id: ${{ github.event.pull_request.head.sha || github.event.inputs.expected_head_sha }}
+    commit-id: ${{ github.event.pull_request.head.sha }}
 jobs:
   review:
-    name: ${{ github.event_name == 'pull_request' && 'Squad Review / review' || 'Squad Review / manual' }}
+    name: Squad Review / review
     if: always()
     needs:
       - agent
@@ -107,23 +92,19 @@ jobs:
     steps:
       - name: Require successful PR review execution
         env:
-          EVENT_NAME: ${{ github.event_name }}
           AGENT_RESULT: ${{ needs.agent.result }}
           OUTPUT_RESULT: ${{ needs.safe_outputs.result }}
         run: |
           set -euo pipefail
-          if [ "$EVENT_NAME" != pull_request ]; then exit 0; fi
           test "$AGENT_RESULT" = success
           test "$OUTPUT_RESULT" = success
       - name: Checkout base commit for final verdict gate
-        if: github.event_name == 'pull_request'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ github.event.pull_request.base.sha }}
           persist-credentials: false
           path: .squad-review-base
       - name: Enforce independent current-head verdict
-        if: github.event_name == 'pull_request'
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3
         env:
           SQUAD_REVIEW_PR: ${{ github.event.pull_request.number }}
@@ -160,18 +141,18 @@ this workflow.
 ## Trigger and target gate
 
 1. Resolve the pull request number from
-   `${{ github.event.inputs.issue_number || github.event.pull_request.number }}`.
+   `${{ github.event.pull_request.number }}`.
    If it is absent or not a positive integer, call `noop` and stop.
 2. Fetch the pull request from `${{ github.repository }}` and record its current
    40-character lowercase head SHA.
-3. For `workflow_dispatch`, require `request_origin` to equal `manual` and
-   `expected_head_sha` to equal the current head SHA. A missing, malformed, or
-   stale value, or a head repository other than `${{ github.repository }}`, is a
-   refusal: call `noop` and stop. This is the `/squad review` path relayed by
-   `workflows/squad.md`.
-4. For `pull_request`, require the head repository to equal
+3. Require the head repository to equal
    `${{ github.repository }}`. Forks and any event other than
    `opened`, `reopened`, `ready_for_review` or `synchronize` are refused with `noop`.
+
+This workflow has no `workflow_dispatch` trigger. `/squad review` is an operator
+aid that points to GitHub's **Re-run jobs** action for the existing automatic
+run. Never execute reviewer code, guards, manifests, or safe-output handlers
+from a manually selected ref.
 
 Read `.squad-review.json` at the exact PR head SHA and the committed
 `.squad/casting/registry.json` at the PR base SHA. The attribution schema is
@@ -240,11 +221,13 @@ machine-readable review marker is a standalone final line:
 `Squad-Review-Head: {40-character lowercase head SHA}`
 
 If an existing bot review contains a `Squad-Review-Verdict:` record for the
-current head SHA, call `noop` and stop. The deterministic gate validates it;
-an arbitrary comment or the legacy head marker is not clearing evidence.
-Never re-review an unchanged head, including duplicate
-`synchronize` deliveries. Re-fetch the pull request immediately before emitting
-outputs; if its head SHA changed, call `noop` and let the newer run review it.
+current head SHA and this exact workflow run ID and attempt, call `noop` and
+stop. Evidence from a different run or attempt cannot deduplicate or clear this
+run. The deterministic gate validates the event, workflow path, PR, base, head,
+run, attempt, and GitHub Actions bot identity; an arbitrary comment or the
+legacy head marker is not clearing evidence. Re-fetch the pull request
+immediately before emitting outputs; if its head SHA changed, call `noop` and
+let the newer run review it.
 
 ## Review procedure
 
@@ -279,12 +262,11 @@ Submit exactly one review:
 
 Do not emit `Squad-Review-Verdict:` or `Squad-Review-Override:` yourself.
 The trusted safe-output guard adds the repository, PR, head SHA, stable
-author/reviewer IDs, result, timestamp and workflow-run binding. Only
-`pull_request` runs mint this evidence; manual `/squad review` is diagnostic
-and does not satisfy the required check. A valid `REQUEST_CHANGES` keeps the
-check red unless an administrator posts the documented SHA- and review-scoped
-override and reruns the PR workflow. Overrides cannot repair invalid identity
-or missing evidence. Never approve or merge on behalf of a human.
+author/reviewer IDs, result, timestamp and exact automatic workflow-run binding.
+Manual dispatch does not exist. A valid `REQUEST_CHANGES` keeps the check red
+unless an administrator posts the documented SHA- and review-scoped override
+and reruns the same PR workflow. Overrides cannot repair invalid identity or
+missing evidence. Never approve or merge on behalf of a human.
 
 Keep the body concise. State the provenance classification, linked issue scope,
 and blocking themes. End with these two standalone lines, substituting the
