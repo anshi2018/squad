@@ -2,7 +2,7 @@ import { afterAll, describe, expect, it } from 'vitest';
 import { cpSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { dirname, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { extractSafeOutputsConfigJson } from './helpers/gh-aw-lock.js';
 import { parse } from 'yaml';
 
@@ -163,9 +163,73 @@ function assertCompiledGate(lock: string): void {
   expect(steps[guard].with.script).toContain('await guard.enforceReviewOutputs');
   expect(steps[guard].if).toBeUndefined();
   expect(steps[guard]['continue-on-error']).toBeUndefined();
-  expect(steps[guard - 1].with.ref).toBe('${{ github.event.pull_request.base.sha || github.workflow_sha }}');
+  const baseCheckout = steps.find((step: { name: string }) =>
+    step.name === 'Checkout base commit for review guard');
+  const workflowCheckout = steps.find((step: { name: string }) =>
+    step.name === 'Checkout workflow commit for first-install review guard');
+  expect(baseCheckout.with.ref).toBe('${{ github.event.pull_request.base.sha || github.workflow_sha }}');
+  expect(workflowCheckout.with.ref).toBe('${{ github.workflow_sha }}');
+  expect(steps[guard].with.script).toContain('existsSync(baseGuard) ? baseGuard : workflowGuard');
+  const finalGate = review.steps.find((step: { name: string }) =>
+    step.name === 'Enforce independent current-head verdict');
+  expect(finalGate.with.script).toContain('existsSync(baseGuard) ? baseGuard : workflowGuard');
   for (const step of review.steps) expect(step['continue-on-error']).toBeUndefined();
   expect(review['continue-on-error']).toBeUndefined();
+}
+
+function safeOutputsGuardScript(lock: string): string {
+  const workflow = parse(lock);
+  const step = workflow.jobs.safe_outputs.steps.find((candidate: { name: string }) =>
+    candidate.name === 'Bind review output to committed agent identities and current head');
+  expect(step, 'compiled safe_outputs guard step is missing').toBeDefined();
+  return step.with.script;
+}
+
+async function executeCompiledGuardLoader(
+  script: string,
+  {
+    baseGuard,
+    workflowGuard,
+    head = 'a'.repeat(40),
+  }: { baseGuard?: string; workflowGuard: string; head?: string },
+): Promise<string> {
+  const workspace = mkdtempSync(resolve(ROOT, '.squad-review-loader-'));
+  compileWorkspaces.push(workspace);
+  const output = resolve(workspace, 'loaded.txt');
+  const guardPath = '.github/workflows/shared/squad-review-guard.mjs';
+  if (baseGuard !== undefined) {
+    const path = resolve(workspace, '.squad-review-base', guardPath);
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, baseGuard);
+  }
+  const workflowPath = resolve(workspace, '.squad-review-workflow', guardPath);
+  mkdirSync(dirname(workflowPath), { recursive: true });
+  writeFileSync(workflowPath, workflowGuard);
+
+  const previousWorkspace = process.env.GITHUB_WORKSPACE;
+  const previousOutput = process.env.SQUAD_TEST_GUARD_OUTPUT;
+  const previousHead = process.env.SQUAD_REVIEW_HEAD;
+  process.env.GITHUB_WORKSPACE = workspace;
+  process.env.SQUAD_TEST_GUARD_OUTPUT = output;
+  process.env.SQUAD_REVIEW_HEAD = head;
+  try {
+    const runner = resolve(workspace, 'runner.mjs');
+    writeFileSync(runner, `
+      import { createRequire } from 'node:module';
+      const require = createRequire(import.meta.url);
+      const github = { request: async () => ({ data: {} }) };
+      ${script}
+    `);
+    await import(`${pathToFileURL(runner).href}?run=${Date.now()}`);
+    return readFileSync(output, 'utf8');
+  } finally {
+    if (previousWorkspace === undefined) delete process.env.GITHUB_WORKSPACE;
+    else process.env.GITHUB_WORKSPACE = previousWorkspace;
+    if (previousOutput === undefined) delete process.env.SQUAD_TEST_GUARD_OUTPUT;
+    else process.env.SQUAD_TEST_GUARD_OUTPUT = previousOutput;
+    if (previousHead === undefined) delete process.env.SQUAD_REVIEW_HEAD;
+    else process.env.SQUAD_REVIEW_HEAD = previousHead;
+  }
 }
 
 describe('gh-aw enforcing Squad reviewer', () => {
@@ -351,6 +415,36 @@ describe('gh-aw enforcing Squad reviewer', () => {
     expect(safeOutputs).not.toHaveProperty('create_issue');
     expect(safeOutputs).not.toHaveProperty('create_pull_request');
     expect(lock).toContain('GH_AW_HEAD_SHA: ${{ github.event.pull_request.head.sha }}');
+  }, 30000);
+
+  it('executes the compiled first-install fallback without weakening established base control', async () => {
+    const { lock } = compileReviewer();
+    const script = safeOutputsGuardScript(lock);
+    const stub = (source: string) => `
+      import { writeFileSync } from 'node:fs';
+      export async function enforceReviewOutputs(env) {
+        writeFileSync(process.env.SQUAD_TEST_GUARD_OUTPUT,
+          JSON.stringify({ source: ${JSON.stringify(source)}, head: env.SQUAD_REVIEW_HEAD }));
+      }
+    `;
+
+    for (const head of [
+      'edd6fbf0f84334ff086ed2bc8bbfed5503fdd56f',
+      '9a898b5182ca432b62bef26dbf1f9022dd1d256b',
+    ]) {
+      await expect(executeCompiledGuardLoader(script, {
+        workflowGuard: stub('workflow'),
+        head,
+      })).resolves.toBe(JSON.stringify({ source: 'workflow', head }));
+    }
+    await expect(executeCompiledGuardLoader(script, {
+      baseGuard: stub('base'),
+      workflowGuard: stub('workflow'),
+    })).resolves.toBe(JSON.stringify({ source: 'base', head: 'a'.repeat(40) }));
+    await expect(executeCompiledGuardLoader(script, {
+      baseGuard: 'this is not valid JavaScript',
+      workflowGuard: stub('workflow'),
+    })).rejects.toThrow();
   }, 30000);
 
   it('kills mutations of every important authority and provenance gate', () => {

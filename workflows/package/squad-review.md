@@ -56,6 +56,12 @@ safe-outputs:
         ref: ${{ github.event.pull_request.base.sha || github.workflow_sha }}
         persist-credentials: false
         path: .squad-review-base
+    - name: Checkout workflow commit for first-install review guard
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        ref: ${{ github.workflow_sha }}
+        persist-credentials: false
+        path: .squad-review-workflow
     - name: Bind review output to committed agent identities and current head
       uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3
       env:
@@ -64,10 +70,13 @@ safe-outputs:
         SQUAD_REVIEW_HEAD: ${{ github.event.pull_request.head.sha || github.event.inputs.expected_head_sha }}
       with:
         script: |
+          const { existsSync } = require('node:fs');
           const { pathToFileURL } = require('node:url');
-          const guard = await import(pathToFileURL(
-            `${process.env.GITHUB_WORKSPACE}/.squad-review-base/.github/workflows/shared/squad-review-guard.mjs`
-          ).href);
+          const baseGuard =
+            `${process.env.GITHUB_WORKSPACE}/.squad-review-base/.github/workflows/shared/squad-review-guard.mjs`;
+          const workflowGuard =
+            `${process.env.GITHUB_WORKSPACE}/.squad-review-workflow/.github/workflows/shared/squad-review-guard.mjs`;
+          const guard = await import(pathToFileURL(existsSync(baseGuard) ? baseGuard : workflowGuard).href);
           await guard.enforceReviewOutputs(process.env,
             async (route, fields) => (await github.request(`GET /${route}`, fields)).data);
   add-comment:
@@ -114,6 +123,13 @@ jobs:
           ref: ${{ github.event.pull_request.base.sha }}
           persist-credentials: false
           path: .squad-review-base
+      - name: Checkout workflow commit for first-install final verdict gate
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+          path: .squad-review-workflow
       - name: Enforce independent current-head verdict
         if: github.event_name == 'pull_request'
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3
@@ -122,10 +138,13 @@ jobs:
           SQUAD_REVIEW_HEAD: ${{ github.event.pull_request.head.sha }}
         with:
           script: |
+            const { existsSync } = require('node:fs');
             const { pathToFileURL } = require('node:url');
-            const guard = await import(pathToFileURL(
-              `${process.env.GITHUB_WORKSPACE}/.squad-review-base/.github/workflows/shared/squad-review-guard.mjs`
-            ).href);
+            const baseGuard =
+              `${process.env.GITHUB_WORKSPACE}/.squad-review-base/.github/workflows/shared/squad-review-guard.mjs`;
+            const workflowGuard =
+              `${process.env.GITHUB_WORKSPACE}/.squad-review-workflow/.github/workflows/shared/squad-review-guard.mjs`;
+            const guard = await import(pathToFileURL(existsSync(baseGuard) ? baseGuard : workflowGuard).href);
             await guard.assertClearingReview(process.env,
               async (route, fields) => (await github.request(`GET /${route}`, fields)).data);
 ---
