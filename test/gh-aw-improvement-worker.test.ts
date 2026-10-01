@@ -463,7 +463,8 @@ describe('improvement: one authorized dispatcher route and installed contract', 
     expect(ROUTER).toContain('gate.validateImprovementCommand(context.payload, process.env)');
     const skill = ROUTER.slice(ROUTER.indexOf('## skill: `squad-approve-improvement`'), ROUTER.indexOf('## skill: `squad-revoke-improvement`'));
     const payload = JSON.parse(skill.match(/```json\n([\s\S]*?)\n```/)![1]);
-    expect(Object.keys(payload.inputs).sort()).toEqual(['approval_comment_id', 'issue_number']);
+    expect(Object.keys(payload.inputs).sort()).toEqual(['approval_comment_id', 'issue_number', 'squad_approval_relay']);
+    expect(payload.inputs.squad_approval_relay).toMatchObject({ event_type: 'issue_comment', item_type: 'issue' });
     expect(payload.issue_number).toBeUndefined();
   });
   it.each([
@@ -510,6 +511,13 @@ describe('improvement: one authorized dispatcher route and installed contract', 
     });
     expect(config.create_pull_request.protected_files).toContain('package.json');
     expect(config).not.toHaveProperty('dispatch_workflow');
+    // The second-hop relay fix (#downstream): the compiled lock must actually
+    // declare the forwarded input and wire it into both env blocks gh-aw
+    // generates, not just the un-compiled source -- proving the compiler
+    // itself emits the mechanism collectImprovementContext's relayed branch
+    // depends on.
+    expect(lock).toContain('squad_approval_relay:');
+    expect((lock.match(/SQUAD_IMPROVE_RELAY_CONTEXT: \$\{\{ github\.event\.inputs\.squad_approval_relay \}\}/g) || []).length).toBe(2);
     expect(WORKER).toContain('patch-format: am');
     expect(WORKER).toContain('echo ".github/workflows/squad-improvement-context.json" >> "${GITHUB_WORKSPACE:?}/.git/info/exclude"');
     expect(WORKER).not.toMatch(/^\s{2}(issue_comment|pull_request|schedule):/m);
@@ -519,3 +527,146 @@ describe('improvement: one authorized dispatcher route and installed contract', 
     expect(job).toContain('SQUAD_IMPROVE_APPROVAL_COMMENT_ID');
   }, 90000);
 });
+
+// Finding #3 (octodemo/zava-social-backend-20261001184422#1): the router
+// relayed `/squad approve-improvement` via workflow_dispatch without any
+// originating comment provenance, so `validateImprovementCommand` could never
+// supply a real `approval_comment_id` and rejected the command outright. The
+// router now forwards an `aw_context` pointer (item type/number + the
+// originating comment id) on the dispatch; these cases exercise exactly the
+// `event.inputs` shape `squad-command-router.md` now emits for that relay,
+// and confirm permission is bound to the comment's own live author -- never
+// the relaying dispatch actor -- so approval binding is not weakened.
+describe('improvement: workflow_dispatch relay carries real comment provenance (#3)', () => {
+  const dispatchVariables = { ...env(), GITHUB_EVENT_NAME: 'workflow_dispatch', GITHUB_ACTOR: 'github-actions[bot]' };
+  const relayEvent = (overrides = {}) => ({
+    inputs: {
+      command: 'approve-improvement',
+      issue_number: '77',
+      aw_context: JSON.stringify({ item_type: 'issue', item_number: 77, comment_id: 901 }),
+      ...overrides,
+    },
+  });
+  it('accepts the exact dispatch shape the router emits, checking permission against the comment author', async () => {
+    const calls: string[] = [];
+    const fetchJson = async (route: string, fields: any) => {
+      calls.push(route);
+      return api().fetchJson(route, fields);
+    };
+    expect(await gate.validateImprovementCommand(relayEvent(), dispatchVariables, fetchJson)).toMatchObject({ ok: true, violations: [] });
+    expect(calls).toContain(`repos/${REPO}/issues/comments/901`);
+    expect(calls).toContain(`repos/${REPO}/collaborators/${encodeURIComponent('maintainer')}/permission`);
+    expect(calls).not.toContain(`repos/${REPO}/collaborators/${encodeURIComponent('github-actions[bot]')}/permission`);
+  });
+  it.each([
+    ['malformed aw_context JSON', () => relayEvent({ aw_context: '{not json' }), {}],
+    ['non-issue item_type', () => relayEvent({ aw_context: JSON.stringify({ item_type: 'pull_request', item_number: 77, comment_id: 901 }) }), {}],
+    ['item_number mismatch vs issue_number', () => relayEvent({ aw_context: JSON.stringify({ item_type: 'issue', item_number: 99, comment_id: 901 }) }), {}],
+    ['non-numeric comment_id', () => relayEvent({ aw_context: JSON.stringify({ item_type: 'issue', item_number: 77, comment_id: 'abc' }) }), {}],
+    ['edited comment (created_at !== updated_at)', () => relayEvent(), { comments: [comment()], approved: comment({ updated_at: '2026-09-02T01:00:00Z' }) }],
+    ['bot-authored comment', () => relayEvent(), { approved: comment({ user: { login: 'maintainer', type: 'Bot' } }) }],
+    ['weak collaborator permission', () => relayEvent(), { permission: { permission: 'read' } }],
+    ['non-matching comment content', () => relayEvent(), { approved: comment({ body: '/squad approve-improvement\nunexpected' }) }],
+  ])('rejects %s without weakening approval binding', async (_name, input, options) => {
+    const fetchJson = api(options).fetchJson;
+    const result = await gate.validateImprovementCommand(input(), dispatchVariables, fetchJson);
+    expect(result.ok).toBe(false);
+    expect(result.violations.length).toBeGreaterThan(0);
+  });
+  it('reserves revoke-improvement over the dispatch relay the same as the native comment route', async () => {
+    const result = await gate.validateImprovementCommand(relayEvent({ command: 'revoke-improvement' }), dispatchVariables);
+    expect(result).toMatchObject({ ok: true, reserved: true, violations: [] });
+  });
+  it('ignores an unrelated relayed command instead of asserting approval', async () => {
+    const result = await gate.validateImprovementCommand(relayEvent({ command: 'status' }), dispatchVariables);
+    expect(result).toMatchObject({ ok: true, ignored: true, violations: [] });
+  });
+});
+
+// Downstream of Finding #3: gh-aw's own dispatch_workflow safe-output engine
+// unconditionally overwrites any agent-supplied `aw_context` input with its
+// own buildAwContext() whenever the dispatch target declares an `aw_context`
+// workflow_dispatch input -- and that engine-built context derives item
+// identity solely from the CURRENT run's own event payload. When squad.md
+// itself is a relayed (workflow_dispatch) run forwarding `approve-improvement`
+// to squad-improvement-worker, its own payload carries no issue/comment, so
+// the engine-injected aw_context on that second hop always carries an empty
+// item_type/item_number/comment_id and event_type: 'workflow_dispatch' --
+// unusable for collectImprovementContext's exact item-identity check, no
+// matter how the event_type check is widened. squad.md now also forwards a
+// second, non-colliding input (`squad_approval_relay`, never named
+// `aw_context`, so gh-aw's engine never touches it) carrying its own
+// independently resolved item identity; collectImprovementContext validates
+// against it only when the engine's own event_type is not 'issue_comment',
+// with identical exact-match strictness to the native path.
+describe('improvement: second-hop relay context survives gh-aw engine aw_context override (#downstream)', () => {
+  const relayedOrigin = {
+    repo: REPO, workflow_id: `${REPO}/.github/workflows/squad.lock.yml@refs/heads/dev`,
+    event_type: 'workflow_dispatch', item_type: '', item_number: '', comment_id: '',
+  };
+  const relayContext = { event_type: 'issue_comment', item_type: 'issue', item_number: '77', comment_id: '901' };
+  const routedEnv = {
+    ...env(), GITHUB_ACTOR: 'github-actions[bot]',
+    SQUAD_IMPROVE_AW_CONTEXT: JSON.stringify(relayedOrigin),
+    SQUAD_IMPROVE_RELAY_CONTEXT: JSON.stringify(relayContext),
+  };
+  it('authorizes using the skill-forwarded relay context when the engine context has no usable item identity', async () => {
+    expect((await gate.collectImprovementContext(routedEnv, api())).authorized).toBe(true);
+  });
+  it('still requires the engine-derived repo/workflow_id even though item identity comes from the relay', async () => {
+    for (const mutation of [{ workflow_id: 'forged' }, { repo: 'other/repo' }]) {
+      const result = await gate.collectImprovementContext({
+        ...routedEnv, SQUAD_IMPROVE_AW_CONTEXT: JSON.stringify({ ...relayedOrigin, ...mutation }),
+      }, api());
+      expect(result.reason).toBe('approval-relay-context-invalid');
+    }
+  });
+  it.each([
+    ['tampered comment_id', { comment_id: '902' }],
+    ['tampered item_number', { item_number: '78' }],
+    ['tampered item_type', { item_type: 'pull_request' }],
+    ['tampered event_type', { event_type: 'workflow_dispatch' }],
+  ])('rejects a %s in the relay context instead of trusting it blindly', async (_name, mutation) => {
+    const result = await gate.collectImprovementContext({
+      ...routedEnv, SQUAD_IMPROVE_RELAY_CONTEXT: JSON.stringify({ ...relayContext, ...mutation }),
+    }, api());
+    expect(result.authorized).toBe(false);
+    expect(result.reason).toBe('approval-relay-context-invalid');
+  });
+  it('rejects malformed or missing relay context instead of falling back to the empty engine item fields', async () => {
+    for (const bad of [undefined, '', '{not json']) {
+      const bundle: Record<string, string> = { ...routedEnv };
+      if (bad === undefined) delete bundle.SQUAD_IMPROVE_RELAY_CONTEXT; else bundle.SQUAD_IMPROVE_RELAY_CONTEXT = bad;
+      const result = await gate.collectImprovementContext(bundle, api());
+      expect(result.authorized).toBe(false);
+      expect(result.reason).toBe('approval-relay-context-invalid');
+    }
+  });
+  it('does not regress the native direct-comment path (engine context alone remains authoritative there)', async () => {
+    const nativeOrigin = {
+      repo: REPO, workflow_id: `${REPO}/.github/workflows/squad.lock.yml@refs/heads/dev`,
+      event_type: 'issue_comment', item_type: 'issue', item_number: '77', comment_id: '901',
+    };
+    const nativeEnv = {
+      ...env(), GITHUB_ACTOR: 'github-actions[bot]', SQUAD_IMPROVE_AW_CONTEXT: JSON.stringify(nativeOrigin),
+    };
+    expect((await gate.collectImprovementContext(nativeEnv, api())).authorized).toBe(true);
+  });
+  it('declares the forwarded relay input on the worker and wires it alongside the existing aw_context at both call sites', () => {
+    expect(WORKER).toContain('squad_approval_relay:');
+    expect((WORKER.match(/SQUAD_IMPROVE_RELAY_CONTEXT: \$\{\{ github\.event\.inputs\.squad_approval_relay \}\}/g) || []).length).toBe(2);
+  });
+  it('strict-compiles squad.md and asserts the dispatch step actually emits squad_approval_relay', () => {
+    const root = scratch();
+    cpSync(resolve(ROOT, 'workflows'), join(root, '.github', 'workflows'), { recursive: true });
+    execFileSync('git', ['init', '--quiet'], { cwd: root });
+    // CI compiles with --approve after review; the squad-init action here is
+    // SHA-pinned to this repository and receives no secret input.
+    execFileSync('gh', ['aw', 'compile', '.github/workflows/squad.md', '--strict', '--approve'], {
+      cwd: root, encoding: 'utf8', stdio: 'pipe', timeout: 120000,
+    });
+    const lock = readFileSync(join(root, '.github', 'workflows', 'squad.lock.yml'), 'utf8');
+    expect(lock).toContain('"squad_approval_relay"');
+  }, 120000);
+});
+
