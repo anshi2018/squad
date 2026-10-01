@@ -160,8 +160,8 @@ pre-agent-steps:
       }
       # BEGIN GENERATED RESOURCE DIGESTS
       check_hash "$install_verifier" "cf474be9b04d339f7e7a18c65e776b8a53e84bea5b4b85abfe65ed11f7b782ce"
-      check_hash "$cast_validator" "0988e04aeef316f4d7a0107c902bbbcf6538b8899b9fffba5f62150717967685"
-      check_hash "$bootstrap_validator" "4fc1bcc79b887bb4f2f78e7eef8693d5c1eaf817d8715ce3c92169934aa225b7"
+      check_hash "$cast_validator" "c6d0b92aac71dc6f6d5727cac418a323b0bc9c12047400faa12d96150d548ada"
+      check_hash "$bootstrap_validator" "6f2ff60104a238c7c171031e737fd8dcb57dd3eeffccbf8c0aeaad016d85ee4e"
       # END GENERATED RESOURCE DIGESTS
       node "$bootstrap_validator" \
         --encode-payload "${GITHUB_WORKSPACE:?}/.github/workflows/squad-bootstrap-payload.json" \
@@ -307,6 +307,7 @@ safe-outputs:
                 writeFileSync(candidatePayloadPath, `${JSON.stringify(candidatePayload)}\n`);
                 const errors = validatorModule.validateBootstrapPayload({
                   root: candidate,
+                  gitRoot: checkout,
                   payloadPath: candidatePayloadPath,
                   repository: context.repo.owner + '/' + context.repo.repo,
                   defaultBranch: process.env.SQUAD_BOOTSTRAP_DEFAULT_BRANCH,

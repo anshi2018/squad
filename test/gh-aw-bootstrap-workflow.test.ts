@@ -11,7 +11,7 @@ import {
 } from 'node:fs';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, join, relative, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { parse } from 'yaml';
@@ -31,6 +31,7 @@ import {
   findBootstrapResearchArtifacts,
   isBootstrapResearchSeed,
   reconstructBootstrapPayload,
+  validateBootstrapPayload,
 } from '../workflows/shared/squad-bootstrap-validator.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -601,6 +602,27 @@ describe('automatic Squad bootstrap workflow', () => {
     const result = validateFixture(fixture);
     expect(result.status, result.stderr).toBe(0);
     expect(result.stdout).toBe('Squad bootstrap validation passed.\n');
+  });
+
+  it('validates an isolated candidate against the trusted checkout Git history', () => {
+    const fixture = createFixture();
+    const candidate = mkdtempSync(join(tmpdir(), 'gh-aw-bootstrap-candidate-'));
+    workspaces.push(candidate);
+    cpSync(fixture.root, candidate, {
+      recursive: true,
+      filter: source => relative(fixture.root, source).split('/')[0] !== '.git',
+    });
+    const options = {
+      root: candidate,
+      payloadPath: join(candidate, 'payload.json'),
+      repository: 'octo/example',
+      defaultBranch: 'main',
+      linkMode: 'placeholder',
+    };
+    expect(validateBootstrapPayload(options)).toContainEqual(
+      expect.stringContaining('registry base: committed HEAD is unavailable'),
+    );
+    expect(validateBootstrapPayload({ ...options, gitRoot: fixture.root })).toEqual([]);
 
     const resolved = {
       ...fixture.payload,
@@ -849,6 +871,7 @@ describe('automatic Squad bootstrap workflow', () => {
     expect(lock).not.toMatch(/"materialize-bootstrap":\{"inputs":\{"payload":/);
     expect(lock).toContain('reconstructBootstrapPayload(items[0])');
     expect(lock).toContain("mkdtempSync(join(tmpdir(), 'squad-bootstrap-candidate-'))");
+    expect(lock).toContain('gitRoot: checkout');
     expect(lock).toContain('Bootstrap payload path crosses a symbolic link');
     expect(lock.indexOf("validate(payload, 'placeholder')"))
       .toBeLessThan(lock.indexOf('safeTarget(checkout, file.path)'));

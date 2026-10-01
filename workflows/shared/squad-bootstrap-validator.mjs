@@ -532,6 +532,7 @@ export function createBootstrapResearchComment(issueBodyText, issueNumber) {
 
 export function validateBootstrapPayload({
   root,
+  gitRoot = root,
   payloadPath,
   repository,
   defaultBranch,
@@ -588,7 +589,7 @@ export function validateBootstrapPayload({
   try {
     const castPayloadPath = join(tempDir, 'cast-paths.json');
     writeFileSync(castPayloadPath, `${JSON.stringify(castPaths)}\n`);
-    errors.push(...validateCastTree({ root, payloadPath: castPayloadPath }));
+    errors.push(...validateCastTree({ root, gitRoot, payloadPath: castPayloadPath }));
   } finally {
     rmSync(tempDir, { recursive: true, force: true });
   }
