@@ -22,7 +22,7 @@ export const PACKAGE_NAME = 'bradygaster/squad/workflows';
 export const PACKAGE_MANIFEST = 'workflows/aw.yml';
 export const CONTRACT_SOURCE = 'workflows/squad-workflows.manifest.json';
 export const CONTRACT_DESTINATION = '.github/aw/squad-workflows.manifest.json';
-export const MIN_GH_AW_VERSION = 'v0.89.21';
+export const MIN_GH_AW_VERSION = 'v0.89.22';
 export const OWNERSHIP_ENTRY_COUNT = 26;
 export const OWNERSHIP_DESTINATION =
   '.github/aw/packages/bradygaster-squad-workflows-3632054824e8.json';
@@ -33,8 +33,8 @@ export const TRIGGER_PROBE_DESTINATION =
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const REVISION_PATTERN = /^[0-9a-f]{40}$/;
 const LOCK_REVISION_PLACEHOLDER = 'f'.repeat(40);
-const COMPILER_ACTION_VERSION = 'v0.89.21';
-const COMPILER_ACTION_SHA = '924af5fdc64061cfbf66fb584c8b07e2ac230c60';
+const COMPILER_ACTION_VERSION = 'v0.89.22';
+const COMPILER_ACTION_SHA = '2fbab69bfca02bebd76cd0fc43f2d12acfed994f';
 const COMPILER_ACTION_REPOS = ['github/gh-aw-actions/setup', 'github/gh-aw-actions/setup-cli'];
 
 function deepFreeze(value) {
@@ -680,8 +680,8 @@ function verifyOwnership(root, contract, expectedRevision) {
   if (record.source !== `${PACKAGE_NAME}@${record.resolvedCommit}`) {
     throw new Error(`Package ownership source must be ${PACKAGE_NAME}@${record.resolvedCommit}.`);
   }
-  if (typeof record.installer !== 'string' || !/^gh-aw v0\.89\.21(?:\b|$)/.test(record.installer)) {
-    throw new Error('Package ownership installer must be gh-aw v0.89.21.');
+  if (typeof record.installer !== 'string' || !/^gh-aw v0\.89\.22(?:\b|$)/.test(record.installer)) {
+    throw new Error('Package ownership installer must be gh-aw v0.89.22.');
   }
   assertArray(record.files, OWNERSHIP_ENTRY_COUNT, 'Package ownership files');
   const expected = expectedOwnership(contract);
@@ -988,7 +988,7 @@ export function writeLocalTestOwnership(root, revision) {
     package: PACKAGE_NAME,
     source: `${PACKAGE_NAME}@${revision}`,
     resolvedCommit: revision,
-    installer: 'gh-aw v0.89.21 local package contract test',
+    installer: 'gh-aw v0.89.22 local package contract test',
     files,
   }));
 }

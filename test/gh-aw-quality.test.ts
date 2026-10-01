@@ -3829,7 +3829,7 @@ describe('gh-aw: canonical package integrity contract', () => {
       package: PACKAGE_NAME,
       source: `${PACKAGE_NAME}@${revision}`,
       resolvedCommit: revision,
-      installer: 'gh-aw v0.89.21 test',
+      installer: 'gh-aw v0.89.22 test',
       files: owned,
     }, null, 2)}\n`);
     return root;
@@ -3961,8 +3961,8 @@ describe('gh-aw: canonical package integrity contract', () => {
       expect(mutable).not.toContain(actionReference);
       expect(createHash('sha256').update(normalizeCompiledLock(mutable, revisionA)).digest('hex'))
         .toBe(sourceBinding === 'workflow'
-          ? '8456d8129241269c107cdf4b16ae079e89a98ef944152df36f53ec0decf3f30d'
-          : 'bac4d8b90269d827fc9e626dd02c1b536bccde7105e9037971740054cda4c19b');
+          ? 'a3290dad380577fd6d64c92169b9d74a7f5248851b110d8eafc6260b34f772d9'
+          : 'fd7c735e2de5088954e8d0d647a15e5f95ed5850947f201c1a4ce17433d66632');
       expect(() => validateCompilerActionPins(mutable)).toThrow(/invalid immutable action pin/);
       writeFileSync(lockPath, mutable);
       expect(verifyInstall(root).failures.join('\n'))
@@ -4016,7 +4016,7 @@ describe('gh-aw: canonical package integrity contract', () => {
     compile();
     const unpinned = readText(lockPath);
     expect(createHash('sha256').update(normalizeCompiledLock(unpinned, revisionA)).digest('hex'))
-      .toBe('bac4d8b90269d827fc9e626dd02c1b536bccde7105e9037971740054cda4c19b');
+      .toBe('fd7c735e2de5088954e8d0d647a15e5f95ed5850947f201c1a4ce17433d66632');
     expect(verifyInstall(root).failures.join('\n')).toContain('Installed digest mismatch');
 
     const seedPins = () => spawnSync(process.execPath, ['--input-type=module', '-e', seed!], {
