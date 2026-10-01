@@ -31,6 +31,7 @@ import {
   findBootstrapResearchArtifacts,
   isBootstrapResearchSeed,
   reconstructBootstrapPayload,
+  validateBootstrapPayload,
 } from '../workflows/shared/squad-bootstrap-validator.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -610,6 +611,27 @@ describe('automatic Squad bootstrap workflow', () => {
     const resolvedResult = validateFixture(fixture, 'resolved');
     expect(resolvedResult.status, resolvedResult.stderr).toBe(0);
     expect(resolvedResult.stdout).toBe('Squad bootstrap validation passed.\n');
+  });
+
+  it('validates an isolated candidate without .git against the checkout committed registry', () => {
+    const fixture = createFixture();
+    const candidate = mkdtempSync(join(tmpdir(), 'gh-aw-bootstrap-candidate-'));
+    workspaces.push(candidate);
+    cpSync(fixture.root, candidate, {
+      recursive: true,
+      filter: source => !/(^|[\\/])\.git([\\/]|$)/.test(source.slice(fixture.root.length)),
+    });
+    expect(existsSync(join(candidate, '.git'))).toBe(false);
+    const options = {
+      root: candidate,
+      payloadPath: fixture.payloadPath,
+      repository: 'octo/example',
+      defaultBranch: 'main',
+      linkMode: 'placeholder',
+    };
+
+    expect(validateBootstrapPayload(options).join('\n')).toContain('registry base: committed HEAD is unavailable');
+    expect(validateBootstrapPayload({ ...options, gitRoot: fixture.root })).toEqual([]);
   });
 
   it('transports a shared payload larger than the old single-string limit byte-identically', () => {
