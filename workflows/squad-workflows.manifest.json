@@ -32,9 +32,9 @@
       "source": "workflows/package/squad-review.md",
       "destination": ".github/workflows/squad-review.md",
       "lock": ".github/workflows/squad-review.lock.yml",
-      "source_sha256": "545ba959d0e4cfc0ba4cc507c2ed2c0d4b2044ca3b9e20a746c8b39cdc100bef",
-      "lock_sha256": "e8cd10cbef0db95cfe05d963eeb683b31a126eb129f1c5be512dd90ad16ca54f",
-      "package_lock_sha256": "928590c67e5636bf08374b62a05797a575990e71c5efd7745da6b73098297130"
+      "source_sha256": "a596d69081c6026f358f88352fb94b91bfc40335a68e94f7d73b7d20ce5e898f",
+      "lock_sha256": "d1d3ac5004188940f27015e696460294c370521bf34555783ebee9216cc5f907",
+      "package_lock_sha256": "a9d47ef3743e21083f7f63a3404d6dbb93003c6cc6c546613c1ff897dc38f44e"
     },
     {
       "name": "squad-deps-worker",
