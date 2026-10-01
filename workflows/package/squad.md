@@ -1050,36 +1050,44 @@ The issue body IS the intent. No special format required, but structured intents
 <Links, prior art, relevant decisions>
 ```
 
-### 3.2 Research Findings
+### 3.2 Squad Research
 
 ```markdown
-## Research Findings
+## 🔬 Squad Research — <Title>
 
 ### Summary
 <1-3 sentence overview of what was discovered>
 
-### Sources
-| # | Source | Type | Key Insight |
-|---|--------|------|-------------|
-| 1 | <link/file/doc> | <codebase/docs/external> | <insight> |
+### Goals
+- <What this research must establish>
+
+### Non-goals
+- <What is explicitly outside this research>
+
+### Evidence table
+| ID | Finding | Risk | Complexity | Citation |
+|----|---------|------|------------|----------|
+| R1 | <checkable finding> | <🟢/🟡/🔴> | <S/M/L/XL> | <one path, path:line, URL, or issue/PR reference> |
+
+### Load-bearing assumptions
+- <Assumption referencing the Rn evidence it depends on>
+
+### Open decisions
+- <Decision requiring human judgment>
+
+### Acceptance framing
+- <Measurable evidence that would make the proposed next step acceptable>
 
 ### Online sources
 <`consulted` — list the URLs fetched this run (each also cited above); or
 `unavailable — <reason>` when no external documentation was fetched. Makes
 degradation observable: never claim `consulted` for a page not actually fetched.>
 
-### Findings
-#### Finding 1: <title>
-<Evidence and analysis>
-
-#### Finding 2: <title>
-<Evidence and analysis>
-
-### Open Questions
-- <Unresolved question needing human input>
-
 ### Recommendations
-- <Actionable recommendation derived from evidence>
+- <Actionable recommendation referencing its Rn evidence>
+
+### Next step
+<`/squad triage` or `/squad plan`>
 ```
 
 ### 3.3 Triage Disposition
@@ -2239,10 +2247,11 @@ request, then stop.
 
 List workflow runs for `.github/workflows/squad-review.lock.yml`. Keep only
 `pull_request_target` runs associated with this pull request whose API
-`head_sha` equals the pull request's exact current head SHA and whose recorded
-pull request head equals the exact current head. Keep immutable workflow source
-separate: the review guard binds `workflow_sha` to the pull request's exact base
-SHA; the run's `head_sha` is not the workflow source SHA.
+`head_sha` equals the pull request's exact base/workflow SHA and whose
+`pull_requests[].head.sha` equals the pull request's exact current head SHA.
+Keep immutable workflow source separate: the review guard binds `workflow_sha` to the pull request's exact base
+SHA, while `pull_requests[].head.sha` binds the reviewed revision to the exact
+pull request head.
 Select the newest run by creation
 time, breaking ties by numeric run ID, then fetch that run attempt's jobs and
 require exactly one job named `review`. A same-named job from any other run is

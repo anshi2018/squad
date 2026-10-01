@@ -3961,8 +3961,8 @@ describe('gh-aw: canonical package integrity contract', () => {
       expect(mutable).not.toContain(actionReference);
       expect(createHash('sha256').update(normalizeCompiledLock(mutable, revisionA)).digest('hex'))
         .toBe(sourceBinding === 'workflow'
-          ? '1aa070ca330d8f8f9f874855c75db410851b30a38efc7543090b697352eda1d2'
-          : 'bf54175720e6e9ab3fe5d5e3054c28f3a69595c95cdf50e56f9b30988158270f');
+          ? '8456d8129241269c107cdf4b16ae079e89a98ef944152df36f53ec0decf3f30d'
+          : 'bac4d8b90269d827fc9e626dd02c1b536bccde7105e9037971740054cda4c19b');
       expect(() => validateCompilerActionPins(mutable)).toThrow(/invalid immutable action pin/);
       writeFileSync(lockPath, mutable);
       expect(verifyInstall(root).failures.join('\n'))
@@ -4016,7 +4016,7 @@ describe('gh-aw: canonical package integrity contract', () => {
     compile();
     const unpinned = readText(lockPath);
     expect(createHash('sha256').update(normalizeCompiledLock(unpinned, revisionA)).digest('hex'))
-      .toBe('bf54175720e6e9ab3fe5d5e3054c28f3a69595c95cdf50e56f9b30988158270f');
+      .toBe('bac4d8b90269d827fc9e626dd02c1b536bccde7105e9037971740054cda4c19b');
     expect(verifyInstall(root).failures.join('\n')).toContain('Installed digest mismatch');
 
     const seedPins = () => spawnSync(process.execPath, ['--input-type=module', '-e', seed!], {

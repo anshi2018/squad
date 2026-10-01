@@ -43,6 +43,14 @@ const PHASE_COMMANDS = new Map([
   ['plan activate', 'plan activate'],
 ]);
 
+const OPEN_MODES = new Set([
+  'status',
+  'review',
+  'research',
+  'plan',
+  'revoke-improvement',
+]);
+
 export const VALID_COMMANDS = Object.freeze([
   '/squad',
   '/squad cast',
@@ -108,16 +116,48 @@ function extractInvocation(source, text) {
     };
   }
 
-  const lower = text.toLowerCase();
-  const at = lower.indexOf('/squad');
-  if (at === -1) return null;
-  const line = text.slice(at).split('\n', 1)[0].trimEnd();
-  const slash = line.match(/^\/squad(?:\s|$)/);
-  return {
-    rejectedCommand: line,
-    argumentText: slash ? line.slice(slash[0].length).trim() : '',
-    malformedPrefix: !slash,
-  };
+  let fence = null;
+  for (const originalLine of normalizeNewlines(text).split('\n')) {
+    if (fence) {
+      const closingFence = originalLine.match(/^ {0,3}(`{3,}|~{3,})[ \t]*$/);
+      if (closingFence
+        && closingFence[1][0] === fence.delimiter
+        && closingFence[1].length >= fence.length) {
+        fence = null;
+      }
+      continue;
+    }
+    const openingFence = originalLine.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+    if (openingFence) {
+      fence = {
+        delimiter: openingFence[1][0],
+        length: openingFence[1].length,
+      };
+      continue;
+    }
+    if (/^(?: {4}| {0,3}\t)/.test(originalLine)) continue;
+    const line = originalLine.replace(/`+[^`]*`+/g, '').trim();
+    if (!/^\/squad/i.test(line)) continue;
+    const slash = line.match(/^\/squad(?:\s|$)/);
+    const invocation = line;
+    return {
+      rejectedCommand: invocation,
+      argumentText: slash ? invocation.slice(slash[0].length).trim() : '',
+      malformedPrefix: !slash,
+    };
+  }
+  return null;
+}
+
+export function commandRequiresAuthorization(result) {
+  if (result?.status !== 'accepted') {
+    throw new Error('An accepted command result is required.');
+  }
+  return !OPEN_MODES.has(result.mode);
+}
+
+export function isAuthorizedPermission(permission) {
+  return ['admin', 'maintain', 'write'].includes(permission);
 }
 
 function accepted(mode, argumentText, phase = null) {
