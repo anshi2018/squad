@@ -60,15 +60,15 @@ default_branch="$(gh repo view --json defaultBranchRef --jq '.defaultBranchRef.n
 echo "Repo: ${owner_repo}  Default branch: ${default_branch}"
 
 # Install the package-capable compiler version used by the distribution contract
-gh extension install --force --pin v0.89.21 github/gh-aw
-test "$(gh aw --version | awk '{print $NF}')" = "v0.89.21"
+gh extension install --force --pin v0.89.22 github/gh-aw
+test "$(gh aw --version | awk '{print $NF}')" = "v0.89.22"
 
 # Git state must be understood and clean enough to isolate the install
 git status --short
 ```
 
 > **Portability — compiler check:** use the equivalent PowerShell commands to
-> force-install `github/gh-aw` at `v0.89.21`, then confirm `gh aw --version`
+> force-install `github/gh-aw` at `v0.89.22`, then confirm `gh aw --version`
 > reports that exact version before installation.
 
 - **STOP** if `gh auth status` is not logged in, or is logged in as the wrong
@@ -222,7 +222,7 @@ This must run after any first-install approval and before committing. Success
 criteria:
 
 - All eight workflows compile successfully.
-- With gh-aw v0.89.21, require exactly two warnings, one occurrence of each
+- With gh-aw v0.89.22, require exactly two warnings, one occurrence of each
   exact diagnostic header below (including its workflow path):
 
 <!-- compile-warning-allowlist-start -->

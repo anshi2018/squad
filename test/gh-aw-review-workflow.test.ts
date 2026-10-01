@@ -378,12 +378,12 @@ describe('gh-aw enforcing Squad reviewer', () => {
 
   it('declares the complete native package for the pinned compiler job', () => {
     const manifest = read('workflows/aw.yml');
-    expect(manifest).toContain('min-version: v0.89.21');
+    expect(manifest).toContain('min-version: v0.89.22');
     expect(manifest.match(/destination: \.github\/workflows\/squad(?:-[\w-]+)?\.md/g)).toHaveLength(8);
     expect(manifest.match(/source: package\/squad(?:-[\w-]+)?\.md/g)).toHaveLength(8);
     expect(manifest).toContain('  - skills/gh-aw-enlistment');
     expect(read('.github/workflows/squad-ci.yml')).toContain(
-      'gh extension install --force --pin v0.89.21 github/gh-aw',
+      'gh extension install --force --pin v0.89.22 github/gh-aw',
     );
   });
 
@@ -442,9 +442,11 @@ describe('gh-aw enforcing Squad reviewer', () => {
   });
 
   it('enforces attribution priority and refuses malformed or unattributed automatic provenance', () => {
+    expect(REVIEWER).toContain('Build its exact regular expression by concatenating');
     expect(REVIEWER).toContain(
-      '^<!-- squad:implement issue=([1-9][0-9]*) run=([1-9][0-9]*) -->$',
+      '`^<`, then\n`!-- squad:implement issue=([1-9][0-9]*) run=([1-9][0-9]*) --`, then `>$`',
     );
+    expect(REVIEWER).not.toContain('^<!-- squad:implement');
     expect(REVIEWER).toContain('require exactly one marker-like occurrence');
     expect(REVIEWER).toContain('^squad/implement-{captured-issue}-');
     assertReviewerContract(REVIEWER);
@@ -496,6 +498,11 @@ describe('gh-aw enforcing Squad reviewer', () => {
   it('strict-compiles to read-only agent permissions and an always-running final gate', () => {
     const { lock, safeOutputs } = compileReviewer();
     assertCompiledGate(lock);
+    expect(lock).toContain('Build its exact regular expression by concatenating');
+    expect(lock).toContain(
+      '`^<`, then\\n`!-- squad:implement issue=([1-9][0-9]*) run=([1-9][0-9]*) --`, then `>$`',
+    );
+    expect(lock).not.toContain('body line matching\\n`^$`');
     const agentJob = lock.match(/^  agent:\n([\s\S]*?)(?=^  [\w-]+:\n)/m)?.[1] ?? '';
     const permissionBlock = yamlBlock(agentJob, 'permissions');
     const workflow = parse(lock);

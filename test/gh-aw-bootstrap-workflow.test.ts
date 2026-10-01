@@ -11,7 +11,7 @@ import {
 } from 'node:fs';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, join, relative, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { parse } from 'yaml';
@@ -602,6 +602,27 @@ describe('automatic Squad bootstrap workflow', () => {
     const result = validateFixture(fixture);
     expect(result.status, result.stderr).toBe(0);
     expect(result.stdout).toBe('Squad bootstrap validation passed.\n');
+  });
+
+  it('validates an isolated candidate against the trusted checkout Git history', () => {
+    const fixture = createFixture();
+    const candidate = mkdtempSync(join(tmpdir(), 'gh-aw-bootstrap-candidate-'));
+    workspaces.push(candidate);
+    cpSync(fixture.root, candidate, {
+      recursive: true,
+      filter: source => relative(fixture.root, source).split('/')[0] !== '.git',
+    });
+    const options = {
+      root: candidate,
+      payloadPath: join(candidate, 'payload.json'),
+      repository: 'octo/example',
+      defaultBranch: 'main',
+      linkMode: 'placeholder',
+    };
+    expect(validateBootstrapPayload(options)).toContainEqual(
+      expect.stringContaining('registry base: committed HEAD is unavailable'),
+    );
+    expect(validateBootstrapPayload({ ...options, gitRoot: fixture.root })).toEqual([]);
 
     const resolved = {
       ...fixture.payload,
@@ -611,27 +632,6 @@ describe('automatic Squad bootstrap workflow', () => {
     const resolvedResult = validateFixture(fixture, 'resolved');
     expect(resolvedResult.status, resolvedResult.stderr).toBe(0);
     expect(resolvedResult.stdout).toBe('Squad bootstrap validation passed.\n');
-  });
-
-  it('validates an isolated candidate without .git against the checkout committed registry', () => {
-    const fixture = createFixture();
-    const candidate = mkdtempSync(join(tmpdir(), 'gh-aw-bootstrap-candidate-'));
-    workspaces.push(candidate);
-    cpSync(fixture.root, candidate, {
-      recursive: true,
-      filter: source => !/(^|[\\/])\.git([\\/]|$)/.test(source.slice(fixture.root.length)),
-    });
-    expect(existsSync(join(candidate, '.git'))).toBe(false);
-    const options = {
-      root: candidate,
-      payloadPath: fixture.payloadPath,
-      repository: 'octo/example',
-      defaultBranch: 'main',
-      linkMode: 'placeholder',
-    };
-
-    expect(validateBootstrapPayload(options).join('\n')).toContain('registry base: committed HEAD is unavailable');
-    expect(validateBootstrapPayload({ ...options, gitRoot: fixture.root })).toEqual([]);
   });
 
   it('enforces a committed research scope and ignores an uncommitted one', () => {
@@ -909,6 +909,7 @@ describe('automatic Squad bootstrap workflow', () => {
     expect(lock).not.toMatch(/"materialize-bootstrap":\{"inputs":\{"payload":/);
     expect(lock).toContain('reconstructBootstrapPayload(items[0])');
     expect(lock).toContain("mkdtempSync(join(tmpdir(), 'squad-bootstrap-candidate-'))");
+    expect(lock).toContain('gitRoot: checkout');
     expect(lock).toContain('Bootstrap payload path crosses a symbolic link');
     expect(lock.indexOf("validate(payload, 'placeholder')"))
       .toBeLessThan(lock.indexOf('safeTarget(checkout, file.path)'));
