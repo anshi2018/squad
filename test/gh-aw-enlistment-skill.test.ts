@@ -277,7 +277,7 @@ describe('gh-aw-enlistment skill', () => {
     });
 
     it('pins and verifies the package-capable gh-aw compiler', () => {
-      expect(content).toContain('gh extension install --force --pin v0.89.21 github/gh-aw');
+      expect(content).toContain('gh extension install --force --pin v0.89.22 github/gh-aw');
       expect(content).toContain('gh aw --version');
       expect(content).toContain('PowerShell');
     });

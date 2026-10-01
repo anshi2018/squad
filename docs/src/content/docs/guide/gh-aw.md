@@ -31,8 +31,8 @@ set -euo pipefail
 gh auth status
 owner_repo="$(gh repo view --json nameWithOwner --jq '.nameWithOwner')"
 default_branch="$(gh repo view --json defaultBranchRef --jq '.defaultBranchRef.name')"
-gh extension install --force --pin v0.89.21 github/gh-aw
-test "$(gh aw --version | awk '{print $NF}')" = "v0.89.21"
+gh extension install --force --pin v0.89.22 github/gh-aw
+test "$(gh aw --version | awk '{print $NF}')" = "v0.89.22"
 
 # 2. Require GitHub Issues, then allow GitHub Actions to create pull requests
 issues_enabled="$(gh api "repos/${owner_repo}" --jq '.has_issues')"
@@ -341,7 +341,7 @@ gh aw compile --strict
 ```
 
 Run this exact command after any required first-install approval and before
-committing. With gh-aw v0.89.21, require exactly two warnings, one occurrence
+committing. With gh-aw v0.89.22, require exactly two warnings, one occurrence
 of each exact diagnostic header below (including its workflow path):
 
 <!-- compile-warning-allowlist-start -->
@@ -1849,7 +1849,7 @@ prints the exact safe recovery commands.
 
 The schema-v2 integrity manifest records two complete compiled lock digests per
 workflow: `lock_sha256` for a per-workflow source annotation and
-`package_lock_sha256` for a package-root annotation. gh-aw v0.89.21 emits
+`package_lock_sha256` for a package-root annotation. gh-aw v0.89.22 emits
 `bradygaster/squad/workflows@SHA` for direct package includes, but can emit
 `bradygaster/squad/workflows/package/<workflow>.md@SHA` when installing dispatched
 dependencies. Fresh and forced installs can therefore contain different mixtures.
@@ -1859,7 +1859,7 @@ URLs, action pins, permissions and runtime bytes remain integrity-checked.
 No additional fields are removed during lock normalization.
 
 Manifest generation and installation test fixtures seed isolated compiler action
-locks with the immutable `setup` and `setup-cli` pins for gh-aw v0.89.21. Both
+locks with the immutable `setup` and `setup-cli` pins for gh-aw v0.89.22. Both
 source variants use the real strict compiler and validate its version and emitted
 action pins. This avoids a second network resolution returning a mutable version
 tag when credentials or the API are unavailable. Missing or altered pins fail
