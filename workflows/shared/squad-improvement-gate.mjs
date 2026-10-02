@@ -260,6 +260,24 @@ async function graphql(env, query, variables) {
   } catch { return { __status: 'request-unavailable' }; }
 }
 
+// Canonicalizes a value to a safe-integer identity only when it is already a
+// valid numeric id in either representation (native number or decimal
+// string), and compares two such values by their canonical integer form
+// rather than by strict type-sensitive equality. gh-aw's own dispatch engine
+// (`resolveItemContext` in its pinned `aw_context.cjs`, v0.90.0) always
+// stringifies `item_number`/`comment_id` before injecting them as
+// `workflow_dispatch` inputs, so in production both sides of every
+// comparison below are already decimal strings and this normalization is a
+// no-op. It exists as defense-in-depth against any future gh-aw engine
+// change, a hand-authored manual `workflow_dispatch` run, or a malformed
+// relay payload — and, unlike a loose `==` comparison, it still rejects
+// non-numeric or malformed forms outright (returns `false` whenever either
+// side fails `isNumericId`), so it never widens what is accepted.
+const sameNumericId = (a, b) => {
+  if (!isNumericId(a) || !isNumericId(b)) return false;
+  return Number(a) === Number(b);
+};
+
 export async function collectImprovementContext(env = process.env, {
   fetchJson = (route, fields) => restJson(env, route, fields),
   fetchGraphql = (query, variables) => graphql(env, query, variables),
@@ -284,8 +302,11 @@ export async function collectImprovementContext(env = process.env, {
     if (origin.event_type === 'issue_comment') {
       // squad.md was triggered directly by the approval comment: gh-aw's engine
       // derives item_type/item_number/comment_id from that same real payload,
-      // so the engine-injected context is itself authoritative here.
-      if (origin.item_type !== 'issue' || origin.item_number !== number || origin.comment_id !== commentId) {
+      // so the engine-injected context is itself authoritative here. Compare
+      // by canonical safe-integer identity (see `sameNumericId`) rather than
+      // strict type-sensitive equality.
+      if (origin.item_type !== 'issue' || !sameNumericId(origin.item_number, number) ||
+          !sameNumericId(origin.comment_id, commentId)) {
         return refuse('approval-relay-context-invalid');
       }
     } else {
@@ -295,11 +316,12 @@ export async function collectImprovementContext(env = process.env, {
       // item fields — never a usable item identity. The skill must instead
       // forward its own independently re-verified item identity under a
       // distinct input name gh-aw's engine does not auto-populate/override,
-      // with identical exact-match binding semantics.
+      // with identical exact-match binding semantics (canonical safe-integer
+      // identity, not strict type-sensitive equality).
       let relay;
       try { relay = JSON.parse(env.SQUAD_IMPROVE_RELAY_CONTEXT || ''); } catch { return refuse('approval-relay-context-invalid'); }
       if (!relay || relay.event_type !== 'issue_comment' || relay.item_type !== 'issue' ||
-          relay.item_number !== number || relay.comment_id !== commentId) {
+          !sameNumericId(relay.item_number, number) || !sameNumericId(relay.comment_id, commentId)) {
         return refuse('approval-relay-context-invalid');
       }
     }

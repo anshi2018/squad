@@ -14,22 +14,30 @@ import { createHash } from 'node:crypto';
 import { dirname, join, relative, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
+import { compileFunction, constants as vmConstants } from 'node:vm';
 import { parse } from 'yaml';
 import {
   BOOTSTRAP_BRANCH,
   BOOTSTRAP_ISSUE_MARKER,
   BOOTSTRAP_ISSUE_TITLE,
+  BOOTSTRAP_PR_FALLBACK_ISSUE_TITLE,
   BOOTSTRAP_PR_TITLE,
   BOOTSTRAP_RESEARCH_TITLE,
+  CREATE_PR_PERMISSION_DENIED_TEXT,
   PAYLOAD_CHUNK_BYTES,
   PAYLOAD_CHUNK_STRING_MAX_BYTES,
   PAYLOAD_MAX_BYTES,
   PAYLOAD_MAX_CHUNKS,
+  bootstrapPrFallbackIssueMarker,
+  buildBootstrapPrFallbackCompareUrl,
+  buildBootstrapPrFallbackIssueBody,
   classifyBootstrapState,
   createBootstrapPayloadEnvelope,
   createBootstrapResearchComment,
   findBootstrapResearchArtifacts,
+  findExistingBootstrapPrFallbackIssue,
   isBootstrapResearchSeed,
+  isCreatePullRequestPermissionDenied,
   reconstructBootstrapPayload,
   validateBootstrapPayload,
 } from '../workflows/shared/squad-bootstrap-validator.mjs';
@@ -1015,5 +1023,326 @@ describe('automatic Squad bootstrap workflow', () => {
     expect(WORKFLOW).not.toContain('auto-merge:');
     expect(WORKFLOW).not.toContain('markPullRequestReadyForReview');
     expect(WORKFLOW).toMatch(/placeholder must never reach GitHub/i);
+  });
+});
+
+// Regression coverage for the `can_approve_pull_request_reviews=false` policy
+// finding: GITHUB_TOKEN pull request creation and review approval cannot be
+// separated (proven against gh-aw's own create_pull_request.cjs /
+// handle_create_pr_error.cjs permission-denied handling), so disabling the
+// setting makes `github.rest.pulls.create` in this job fail with GitHub's
+// exact "GitHub Actions is not permitted to create or approve pull requests"
+// error. These tests exercise the real extracted `if (!pullRequest) { ... }`
+// control flow (including its fallback-to-issue catch block) the same way
+// `actions/github-script` runs it, not a reimplementation of it.
+describe('gh-aw: squad-bootstrap pull-request-creation permission-denied fallback', () => {
+  /** Read a short `const name = async (...) => { ... };` statement verbatim from source. */
+  function extractConstArrow(source: string, declaration: string): string {
+    const startIndex = source.indexOf(declaration);
+    expect(startIndex, `declaration not found: ${declaration}`).toBeGreaterThanOrEqual(0);
+    const endIndex = source.indexOf('\n              };', startIndex);
+    expect(endIndex, `no closing '};' for: ${declaration}`).toBeGreaterThanOrEqual(0);
+    return source.slice(startIndex, endIndex + '\n              };'.length);
+  }
+
+  /** Read the `if (!pullRequest) { ... } else { ... }` statement verbatim from source. */
+  function extractPrCreationBlock(source: string): string {
+    const startMarker = 'let pullRequest = snapshot.state.pull_request;';
+    const startIndex = source.indexOf(startMarker);
+    expect(startIndex, 'pullRequest block start not found').toBeGreaterThanOrEqual(0);
+    const elseCloseMarker = 'await assertRemotePayload(ref);\n              }';
+    const elseCloseIndex = source.indexOf(elseCloseMarker, startIndex);
+    expect(elseCloseIndex, 'pullRequest block end not found').toBeGreaterThanOrEqual(0);
+    return source.slice(startIndex, elseCloseIndex + elseCloseMarker.length);
+  }
+
+  const getRefSource = extractConstArrow(WORKFLOW, 'const getRef = async (ref) => {');
+  const prCreationSource = extractPrCreationBlock(WORKFLOW);
+
+  function compileScript(script: string) {
+    return compileFunction(
+      `return (async () => {\n${script}\n return pullRequest;\n})();`,
+      ['snapshot', 'payload', 'stateModule', 'context', 'process', 'github', 'core', 'assertRemotePayload'],
+      { importModuleDynamically: vmConstants.USE_MAIN_CONTEXT_DEFAULT_LOADER },
+    ) as (...args: unknown[]) => Promise<unknown>;
+  }
+
+  const compiled = compileScript(`${getRefSource}\n${prCreationSource}`);
+  const stateModule = {
+    BOOTSTRAP_BRANCH,
+    BOOTSTRAP_PR_TITLE,
+    BOOTSTRAP_PR_FALLBACK_ISSUE_TITLE,
+    buildBootstrapPrFallbackCompareUrl,
+    findExistingBootstrapPrFallbackIssue,
+    buildBootstrapPrFallbackIssueBody,
+    isCreatePullRequestPermissionDenied,
+  };
+
+  function permissionDeniedError(): Error {
+    return new Error(CREATE_PR_PERMISSION_DENIED_TEXT);
+  }
+
+  function makeGithub(overrides: {
+    pullsCreate?: (...args: unknown[]) => unknown;
+    issuesCreate?: (...args: unknown[]) => unknown;
+  }) {
+    let bootstrapRefCreated = false;
+    const issuesCreateCalls: Array<Record<string, unknown>> = [];
+    const defaultIssuesCreate = async (args: Record<string, unknown>) => {
+      issuesCreateCalls.push(args);
+      return { data: { html_url: 'https://github.com/octo/example/issues/9', number: 9 } };
+    };
+    const getRef = async ({ ref }: { ref: string }) => {
+      if (ref === `heads/${BOOTSTRAP_BRANCH}`) {
+        if (!bootstrapRefCreated) {
+          const notFound = Object.assign(new Error('Not Found'), { status: 404 });
+          throw notFound;
+        }
+        return { data: { object: { sha: 'bootstrap-ref-sha' } } };
+      }
+      if (ref === 'heads/main') {
+        return { data: { object: { sha: 'main-sha' } } };
+      }
+      throw new Error(`Unexpected getRef call: ${ref}`);
+    };
+    const github = {
+      rest: {
+        git: {
+          getRef,
+          getCommit: async () => ({ data: { tree: { sha: 'base-tree-sha' } } }),
+          createBlob: async () => ({ data: { sha: 'blob-sha' } }),
+          createTree: async () => ({ data: { sha: 'created-tree-sha' } }),
+          createCommit: async () => ({ data: { sha: 'commit-sha' } }),
+          createRef: async () => {
+            bootstrapRefCreated = true;
+            return { data: {} };
+          },
+        },
+        pulls: {
+          create:
+            overrides.pullsCreate ??
+            (async () => ({ data: { number: 3, state: 'open', html_url: 'https://github.com/octo/example/pull/3' } })),
+        },
+        issues: { create: overrides.issuesCreate ?? defaultIssuesCreate },
+      },
+    };
+    return { github, issuesCreateCalls };
+  }
+
+  function makeArgs(overrides: {
+    pullsCreate?: (...args: unknown[]) => unknown;
+    issuesCreate?: (...args: unknown[]) => unknown;
+    issues?: unknown[];
+  } = {}) {
+    const info: string[] = [];
+    const warnings: string[] = [];
+    const { github, issuesCreateCalls } = makeGithub(overrides);
+    const core = {
+      info: (message: string) => info.push(message),
+      warning: (message: string) => warnings.push(message),
+    };
+    const snapshot = { state: { pull_request: null }, issues: overrides.issues ?? [] };
+    const payload = { files: [{ path: 'a.txt', content: 'hi' }], pr_body: 'body' };
+    const context = { repo: { owner: 'octo', repo: 'example' } };
+    const processEnv = {
+      env: {
+        SQUAD_BOOTSTRAP_DEFAULT_BRANCH: 'main',
+        GITHUB_SERVER_URL: 'https://github.com',
+        SQUAD_BOOTSTRAP_RUN_ID: '123',
+      },
+    };
+    // Never expected to run for the fresh-branch (!pullRequest, !existingRef) path this
+    // harness exercises; throwing catches an accidental control-flow regression.
+    const assertRemotePayload = async () => {
+      throw new Error('assertRemotePayload should not run for the !pullRequest branch-creation path');
+    };
+    return { snapshot, payload, context, process: processEnv, github, core, assertRemotePayload, info, warnings, issuesCreateCalls };
+  }
+
+  async function run(overrides: Parameters<typeof makeArgs>[0] = {}) {
+    const args = makeArgs(overrides);
+    const result = await compiled(
+      args.snapshot,
+      args.payload,
+      stateModule,
+      args.context,
+      args.process,
+      args.github,
+      args.core,
+      args.assertRemotePayload,
+    );
+    return { result, ...args };
+  }
+
+  it('creates the Cast pull request normally when GitHub Actions is permitted (no fallback invoked)', async () => {
+    const { result, issuesCreateCalls } = await run();
+    expect((result as { number: number }).number).toBe(3);
+    expect(issuesCreateCalls).toHaveLength(0);
+  });
+
+  it('falls back to a manual-creation issue on the exact permission-denied error', async () => {
+    const { result, issuesCreateCalls, warnings } = await run({
+      pullsCreate: async () => {
+        throw permissionDeniedError();
+      },
+    });
+    expect(result).toBeUndefined();
+    expect(issuesCreateCalls).toHaveLength(1);
+    expect(issuesCreateCalls[0].title).toBe(BOOTSTRAP_PR_FALLBACK_ISSUE_TITLE);
+    expect(String(issuesCreateCalls[0].body)).toContain(bootstrapPrFallbackIssueMarker(BOOTSTRAP_BRANCH));
+    expect(String(issuesCreateCalls[0].body)).toContain(
+      buildBootstrapPrFallbackCompareUrl({
+        repository: 'octo/example',
+        baseBranch: 'main',
+        headBranch: BOOTSTRAP_BRANCH,
+        title: BOOTSTRAP_PR_TITLE,
+        server: 'https://github.com',
+      }),
+    );
+    expect(warnings.some((message) => message.includes('Opened a fallback issue'))).toBe(true);
+  });
+
+  it('rethrows an unrelated pull-request creation error without creating a fallback issue', async () => {
+    const args = makeArgs({
+      pullsCreate: async () => {
+        throw new Error('Validation Failed: a pull request already exists');
+      },
+    });
+    await expect(
+      compiled(args.snapshot, args.payload, stateModule, args.context, args.process, args.github, args.core, args.assertRemotePayload),
+    ).rejects.toThrow('Validation Failed: a pull request already exists');
+    expect(args.issuesCreateCalls).toHaveLength(0);
+  });
+
+  it('propagates a combined error (never success-shaped output) when both PR and fallback-issue creation fail', async () => {
+    const args = makeArgs({
+      pullsCreate: async () => {
+        throw permissionDeniedError();
+      },
+      issuesCreate: async () => {
+        throw new Error('secondary API outage');
+      },
+    });
+    await expect(
+      compiled(args.snapshot, args.payload, stateModule, args.context, args.process, args.github, args.core, args.assertRemotePayload),
+    ).rejects.toThrow(/Failed to create the Cast pull request .*and failed to create the fallback issue/);
+  });
+
+  it('dedupes reruns: an already-open fallback issue suppresses a duplicate issue', async () => {
+    const existingIssue = {
+      state: 'open',
+      html_url: 'https://github.com/octo/example/issues/9',
+      body: `${bootstrapPrFallbackIssueMarker(BOOTSTRAP_BRANCH)}\nprevious fallback`,
+    };
+    const { result, issuesCreateCalls, info } = await run({
+      pullsCreate: async () => {
+        throw permissionDeniedError();
+      },
+      issues: [existingIssue],
+    });
+    expect(result).toBeUndefined();
+    expect(issuesCreateCalls).toHaveLength(0);
+    expect(info.some((message) => message.includes('already requests manual Cast pull request creation'))).toBe(true);
+  });
+
+  it('does not dedupe against a closed fallback issue (a human dismissal does not suppress a fresh report)', async () => {
+    const closedIssue = {
+      state: 'closed',
+      html_url: 'https://github.com/octo/example/issues/9',
+      body: `${bootstrapPrFallbackIssueMarker(BOOTSTRAP_BRANCH)}\nprevious fallback`,
+    };
+    const { issuesCreateCalls } = await run({
+      pullsCreate: async () => {
+        throw permissionDeniedError();
+      },
+      issues: [closedIssue],
+    });
+    expect(issuesCreateCalls).toHaveLength(1);
+  });
+
+  it('confirms the branch was actually pushed before falling back (regression: no silent fallback on a failed push)', async () => {
+    // getRef for the bootstrap branch never flips to "created" because createRef is stubbed
+    // to fail, so the post-catch confirmation must itself fail closed rather than reporting
+    // a fallback issue for a branch that was never pushed.
+    const { github, issuesCreateCalls } = makeGithub({
+      pullsCreate: async () => {
+        throw permissionDeniedError();
+      },
+    });
+    github.rest.git.createRef = async () => {
+      throw new Error('could not create ref');
+    };
+    const args = makeArgs({});
+    (args as unknown as { github: unknown }).github = github;
+    await expect(
+      compiled(args.snapshot, args.payload, stateModule, args.context, args.process, github, args.core, args.assertRemotePayload),
+    ).rejects.toThrow('could not create ref');
+    expect(issuesCreateCalls).toHaveLength(0);
+  });
+});
+
+describe('gh-aw: squad-bootstrap pull-request fallback pure helpers (unit + mutation coverage)', () => {
+  it('matches only the exact gh-aw GitHub Actions permission-denied message', () => {
+    expect(isCreatePullRequestPermissionDenied(new Error(CREATE_PR_PERMISSION_DENIED_TEXT))).toBe(true);
+    expect(isCreatePullRequestPermissionDenied(new Error(`prefix: ${CREATE_PR_PERMISSION_DENIED_TEXT} suffix`))).toBe(true);
+    expect(isCreatePullRequestPermissionDenied(new Error('Validation Failed'))).toBe(false);
+    expect(isCreatePullRequestPermissionDenied(new Error('not permitted to approve pull requests'))).toBe(false);
+    expect(isCreatePullRequestPermissionDenied(undefined)).toBe(false);
+    expect(isCreatePullRequestPermissionDenied({})).toBe(false);
+  });
+
+  it('builds a compare URL with per-segment-encoded branch names (URL binding)', () => {
+    const url = buildBootstrapPrFallbackCompareUrl({
+      repository: 'octo/example',
+      baseBranch: 'main',
+      headBranch: 'squad/bootstrap-cast',
+      title: BOOTSTRAP_PR_TITLE,
+      server: 'https://github.example.com',
+    });
+    expect(url).toBe(
+      'https://github.example.com/octo/example/compare/main...squad/bootstrap-cast?expand=1&title=%5Bsquad%5D%20Cast%20your%20Squad',
+    );
+  });
+
+  it('defaults the compare URL server and rejects a malformed repository identity', () => {
+    const url = buildBootstrapPrFallbackCompareUrl({
+      repository: 'octo/example',
+      baseBranch: 'main',
+      headBranch: BOOTSTRAP_BRANCH,
+    });
+    expect(url.startsWith('https://github.com/octo/example/compare/')).toBe(true);
+    expect(() =>
+      buildBootstrapPrFallbackCompareUrl({ repository: 'not-owner-slash-repo', baseBranch: 'main', headBranch: 'b' }),
+    ).toThrow();
+  });
+
+  it('finds an existing open fallback issue by branch-bound marker and fails closed on ambiguity', () => {
+    const marker = bootstrapPrFallbackIssueMarker(BOOTSTRAP_BRANCH);
+    const open = { state: 'open', body: `${marker}\nmore`, html_url: 'u1' };
+    expect(findExistingBootstrapPrFallbackIssue([], BOOTSTRAP_BRANCH)).toBeNull();
+    expect(findExistingBootstrapPrFallbackIssue([open], BOOTSTRAP_BRANCH)).toBe(open);
+    expect(findExistingBootstrapPrFallbackIssue([{ state: 'closed', body: marker }], BOOTSTRAP_BRANCH)).toBeNull();
+    expect(findExistingBootstrapPrFallbackIssue([{ state: 'open', body: 'unrelated' }], BOOTSTRAP_BRANCH)).toBeNull();
+    expect(() =>
+      findExistingBootstrapPrFallbackIssue([open, { state: 'open', body: `${marker}\nother` }], BOOTSTRAP_BRANCH),
+    ).toThrow(/Ambiguous/);
+  });
+
+  it('binds the fallback issue body to the exact compare URL and branch marker', () => {
+    const compareUrl = 'https://github.com/octo/example/compare/main...squad%2Fbootstrap-cast?expand=1';
+    const body = buildBootstrapPrFallbackIssueBody({
+      repository: 'octo/example',
+      baseBranch: 'main',
+      headBranch: BOOTSTRAP_BRANCH,
+      compareUrl,
+      runUrl: 'https://github.com/octo/example/actions/runs/123',
+    });
+    expect(body.startsWith(bootstrapPrFallbackIssueMarker(BOOTSTRAP_BRANCH))).toBe(true);
+    expect(body).toContain(compareUrl);
+    expect(body).toContain('octo/example');
+    expect(body).toContain('Allow GitHub Actions to create and approve pull requests');
+    expect(() =>
+      buildBootstrapPrFallbackIssueBody({ repository: 'octo/example', baseBranch: 'main', headBranch: BOOTSTRAP_BRANCH, compareUrl: 'not-a-url' }),
+    ).toThrow();
   });
 });

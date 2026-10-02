@@ -74,15 +74,18 @@ test "$(gh api "repos/${owner_repo}" --jq '.has_issues')" = "true" || {
 
 gh api --method PUT "repos/${owner_repo}/actions/permissions/workflow" \
   -f default_workflow_permissions=read \
-  -F can_approve_pull_request_reviews=true
+  -F can_approve_pull_request_reviews=false
 
 # 3. Create a bootstrap branch
 git switch -c chore/squad-gh-aw-bootstrap
 
-# 4. Resolve the supported channel once, then install the complete native package
-SQUAD_SHA="$(gh api repos/bradygaster/squad/commits/dev --jq '.sha')"
+# 4. Install the complete native package at an explicit, maintainer-approved
+# revision. SQUAD_SHA is never resolved from the `dev` branch's moving tip —
+# ask the Squad maintainers (or check the project's published release
+# guidance) for the current supported revision.
+SQUAD_SHA="<40-character-commit-sha>"
 [[ "${SQUAD_SHA}" =~ ^[0-9a-f]{40}$ ]] || {
-  echo "STOP: could not resolve an immutable 40-character Squad commit SHA." >&2
+  echo "STOP: SQUAD_SHA must be an explicit 40-character Squad commit SHA, not a branch name or shortened hash." >&2
   exit 1
 }
 
@@ -233,25 +236,31 @@ in repository settings, then rerun the supported quick start.
 
 ### Allow workflow-created pull requests
 
-Squad opens pull requests through GitHub Actions. Enable this repository setting
-under **Settings → Actions → General → Workflow permissions → Allow GitHub
-Actions to create and approve pull requests**.
+Squad opens pull requests through GitHub Actions. Keep this repository setting
+**disabled** under **Settings → Actions → General → Workflow permissions →
+Allow GitHub Actions to create and approve pull requests**.
 
-You can also enable it from the command line while keeping the default workflow
+Set it explicitly from the command line while keeping the default workflow
 token read-only:
 
 ```bash
 owner_repo="$(gh repo view --json nameWithOwner --jq '.nameWithOwner')"
 gh api --method PUT "repos/${owner_repo}/actions/permissions/workflow" \
   -f default_workflow_permissions=read \
-  -F can_approve_pull_request_reviews=true
+  -F can_approve_pull_request_reviews=false
 ```
 
 Resolve the repository identity at runtime as shown; do not hardcode an example
-owner or repository. Without this setting, Squad pushes the generated branch but
-falls back to an issue containing a link for you to create the pull request
-manually. A manually created pull request is authored by your account, and
-GitHub does not allow authors to approve their own pull requests.
+owner or repository. This single GitHub toggle gates both `GITHUB_TOKEN`
+pull-request **creation** and review **approval** together — they cannot be
+separated with job-level `permissions:` alone, and GitHub's own API reference
+calls enabling it a security risk. With it disabled, `squad-bootstrap` still
+pushes the generated branch, then catches the exact GitHub Actions
+permission-denied error from `github.rest.pulls.create` and falls back to an
+issue containing a ready-to-click compare URL for you to create the pull
+request manually. Every bootstrap and Cast PR, whichever way it is opened,
+still requires an independent human (or `@copilot`) approving review before
+merge — `GITHUB_TOKEN` is never used to self-approve.
 
 ### Create a bootstrap branch
 
@@ -266,9 +275,12 @@ compilation and human review are complete.
 ### Install the workflows
 
 ```bash
-SQUAD_SHA="$(gh api repos/bradygaster/squad/commits/dev --jq '.sha')"
+# SQUAD_SHA must be an explicit, maintainer-approved 40-character commit SHA.
+# Never resolve it from `dev`'s moving tip (`commits/dev`) — that would install
+# an unbounded, mutable revision instead of one reviewed, immutable commit.
+SQUAD_SHA="<40-character-commit-sha>"
 [[ "${SQUAD_SHA}" =~ ^[0-9a-f]{40}$ ]] || {
-  echo "STOP: could not resolve an immutable 40-character Squad commit SHA." >&2
+  echo "STOP: SQUAD_SHA must be an explicit 40-character Squad commit SHA, not a branch name or shortened hash." >&2
   exit 1
 }
 gh aw add "bradygaster/squad/workflows@${SQUAD_SHA}"
@@ -313,9 +325,10 @@ auto-implementation](#retrospective-auto-implementation-opt-in) below).
 `gh aw add` also installs the Squad skills under `.github/skills/`, which is why
 the bootstrap commit stages that path alongside the workflows.
 
-> **Revision note:** `dev` is resolved once to `SQUAD_SHA`; the package install
-> itself uses only that immutable commit. Never install different Squad files
-> from different refs.
+> **Revision note:** `SQUAD_SHA` is an explicit, maintainer-approved commit —
+> never resolved from `dev`'s moving tip. The package install itself uses only
+> that one immutable commit. Never install different Squad files from
+> different refs.
 
 This registers the Squad workflow in your repository's agentic workflow
 configuration and compiles the workflow definitions into deterministic

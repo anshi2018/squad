@@ -436,14 +436,30 @@ export async function assertClearingReview(env, get, options = {}) {
   }
   if (verdict.result === 'REQUEST_CHANGES') {
     const comments = await list(get, `repos/${target.repository}/issues/${target.pull_request}/comments`);
-    const overrides = comments.filter(comment =>
-      String(comment.body ?? '').includes(OVERRIDE_PREFIX.trim()))
-      .filter(comment => {
-        const candidate = record(comment.body, OVERRIDE_PREFIX);
-        requireThat(typeof candidate.head_sha === 'string' && SHA.test(candidate.head_sha),
-          'override has an invalid head SHA');
-        return candidate.head_sha === target.head_sha;
-      });
+    const tagged = comments.filter(comment => String(comment.body ?? '').includes(OVERRIDE_PREFIX.trim()));
+    // Authorize the comment's AUTHOR -- human, admin permission -- before any
+    // marker content is parsed or counted. Checking identity first never
+    // requires touching the body, so an unauthorized actor (any non-admin
+    // collaborator, or a bot) cannot get their comment parsed at all, and
+    // cannot post a syntactically valid, SHA-matching lookalike purely to
+    // inflate the candidate count and veto a legitimate admin's override (the
+    // `overrides.length === 1` cardinality check below would otherwise refuse
+    // a real, authorized override whenever an unauthorized lookalike is also
+    // present). A malformed marker from an authorized admin still fails
+    // closed below -- it is never silently skipped.
+    const authorized = [];
+    for (const comment of tagged) {
+      if (comment.user?.type !== 'User' || !/^[\w-]+$/.test(comment.user?.login ?? '')) continue;
+      const permission = await get(`repos/${target.repository}/collaborators/${comment.user.login}/permission`);
+      if (permission.permission !== 'admin') continue;
+      authorized.push(comment);
+    }
+    const overrides = authorized.filter(comment => {
+      const candidate = record(comment.body, OVERRIDE_PREFIX);
+      requireThat(typeof candidate.head_sha === 'string' && SHA.test(candidate.head_sha),
+        'override has an invalid head SHA');
+      return candidate.head_sha === target.head_sha;
+    });
     requireThat(overrides.length === 1, 'REQUEST_CHANGES needs exactly one explicit override');
     const comment = overrides[0];
     const override = record(comment.body, OVERRIDE_PREFIX);
@@ -453,13 +469,9 @@ export async function assertClearingReview(env, get, options = {}) {
       override.head_sha === target.head_sha && override.review_id === review.id &&
       typeof override.reason === 'string' && override.reason.trim().length >= 10,
     'invalid SHA-scoped override');
-    requireThat(comment.user?.type === 'User' && /^[\w-]+$/.test(comment.user.login) &&
-      timestamp(comment.created_at) >= timestamp(review.submitted_at) &&
+    requireThat(timestamp(comment.created_at) >= timestamp(review.submitted_at) &&
       timestamp(comment.updated_at) === timestamp(comment.created_at) &&
       timestamp(comment.created_at) <= cutoff, 'override must be a new, unedited human comment');
-    const permission = await get(
-      `repos/${target.repository}/collaborators/${comment.user.login}/permission`);
-    requireThat(permission.permission === 'admin', 'override requires repository administrator');
   }
   await reviewTarget(env, get, {
     ...options,

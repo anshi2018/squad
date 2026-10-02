@@ -1216,7 +1216,7 @@ degradation observable: never claim `consulted` for a page not actually fetched.
 ```markdown
 ## Plan Validation
 
-### Result: <✅ PASS | ❌ FAIL>
+RESULT: <PASS | FAIL>
 
 ### Checks
 
@@ -2344,7 +2344,13 @@ own workflow_dispatch trigger carries no native issue/comment payload for
 gh-aw's dispatch engine to derive context from when this run was itself
 relayed, so the worker-side gate cannot rely on engine-injected `aw_context`
 for the item identity in that case and requires this explicit, separately
-re-verified echo instead:
+re-verified echo instead. `squad_approval_relay` is declared `type: string` on
+the receiving workflow and the gate parses it with `JSON.parse`, and GitHub's
+`workflow_dispatch` REST input schema accepts only string values for every
+input regardless of its declared type — an object value is rejected outright
+("is not of a type(s) string") and the dispatch never happens. Emit
+`squad_approval_relay` as a **JSON-encoded string** (the object below,
+stringified), never as a nested JSON object:
 
 ```json
 {
@@ -2352,12 +2358,7 @@ re-verified echo instead:
   "inputs": {
     "issue_number": "{issue-number}",
     "approval_comment_id": "{resolved-approval-comment-id}",
-    "squad_approval_relay": {
-      "event_type": "issue_comment",
-      "item_type": "issue",
-      "item_number": "{issue-number}",
-      "comment_id": "{resolved-approval-comment-id}"
-    }
+    "squad_approval_relay": "{\"event_type\":\"issue_comment\",\"item_type\":\"issue\",\"item_number\":\"{issue-number}\",\"comment_id\":\"{resolved-approval-comment-id}\"}"
   }
 }
 ```

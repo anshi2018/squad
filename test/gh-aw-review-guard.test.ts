@@ -552,6 +552,45 @@ describe('independent Squad review guard', () => {
     await expect(assertClearingReview(f.env, f.get, { relay: true })).rejects.toThrow();
   });
 
+  it('ignores an unauthorized override lookalike for cardinality so a legitimate admin override still clears (authorization before parsing)', async () => {
+    // Regression for the fix order: candidates must be filtered by comment-author
+    // authorization BEFORE any marker content is parsed/counted. If authorization
+    // ran after cardinality (the prior bug), this syntactically valid, SHA-matching
+    // non-admin lookalike would inflate `overrides` to length 2 and the real admin
+    // override below would be wrongly rejected as ambiguous.
+    const f = fixture(true);
+    f.verdict.result = 'REQUEST_CHANGES';
+    const attacker = {
+      user: { login: 'attacker', type: 'User' }, created_at: FINISHED, updated_at: FINISHED,
+      body: `${OVERRIDE_PREFIX}${JSON.stringify({ ...f.override, reason: 'forged override, must never count toward cardinality' })}`,
+    };
+    f.state.comments = [f.comment, attacker];
+    const baseGet = f.get;
+    const get = async (route: string, fields?: Record<string, unknown>) =>
+      route.endsWith('/collaborators/attacker/permission') ? { permission: 'write' } : baseGet(route, fields);
+    f.sync();
+    await expect(assertClearingReview(f.env, get, { relay: true })).resolves.toEqual(f.verdict);
+  });
+
+  it('still fails closed on a malformed override from an authorized admin, even alongside an unauthorized lookalike', async () => {
+    // Authorization-first must never relax validation of an authorized candidate's
+    // own record: a malformed marker body from an admin is still rejected, and the
+    // unauthorized lookalike is still excluded rather than being substituted in.
+    const f = fixture(true);
+    f.verdict.result = 'REQUEST_CHANGES';
+    const attacker = {
+      user: { login: 'attacker', type: 'User' }, created_at: FINISHED, updated_at: FINISHED,
+      body: `${OVERRIDE_PREFIX}${JSON.stringify({ ...f.override, reason: 'forged override, must never count toward cardinality' })}`,
+    };
+    f.sync();
+    f.comment.body = `${OVERRIDE_PREFIX}{invalid`;
+    f.state.comments = [f.comment, attacker];
+    const baseGet = f.get;
+    const get = async (route: string, fields?: Record<string, unknown>) =>
+      route.endsWith('/collaborators/attacker/permission') ? { permission: 'write' } : baseGet(route, fields);
+    await expect(assertClearingReview(f.env, get, { relay: true })).rejects.toThrow();
+  });
+
   it('cannot override missing, stale, or self-authored evidence', async () => {
     for (const mutation of ['missing', 'self', 'stale']) {
       const f = fixture(true);

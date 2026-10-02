@@ -586,7 +586,7 @@ test "$(gh api "repos/${owner_repo}" --jq '.has_issues')" = "true" || {
   exit 1
 }
 
-SQUAD_SHA="$(gh api repos/bradygaster/squad/commits/dev --jq '.sha')"
+SQUAD_SHA="<40-character-commit-sha>"  # explicit, maintainer-approved; never `commits/dev`
 gh aw add "bradygaster/squad/workflows@${SQUAD_SHA}"
 git add -- \
   .github/aw/ \

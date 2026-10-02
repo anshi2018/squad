@@ -161,7 +161,7 @@ pre-agent-steps:
       # BEGIN GENERATED RESOURCE DIGESTS
       check_hash "$install_verifier" "cf474be9b04d339f7e7a18c65e776b8a53e84bea5b4b85abfe65ed11f7b782ce"
       check_hash "$cast_validator" "c6d0b92aac71dc6f6d5727cac418a323b0bc9c12047400faa12d96150d548ada"
-      check_hash "$bootstrap_validator" "6f2ff60104a238c7c171031e737fd8dcb57dd3eeffccbf8c0aeaad016d85ee4e"
+      check_hash "$bootstrap_validator" "e1f977e735f385b249d4e576cb1b149d9af26341ec4ebdcdfc0d1c23f34c4658"
       # END GENERATED RESOURCE DIGESTS
       node "$bootstrap_validator" \
         --encode-payload "${GITHUB_WORKSPACE:?}/.github/workflows/squad-bootstrap-payload.json" \
@@ -468,14 +468,70 @@ safe-outputs:
                     sha: commit.data.sha,
                   });
                 }
-                const created = await github.rest.pulls.create({
-                  ...context.repo,
-                  title: stateModule.BOOTSTRAP_PR_TITLE,
-                  head: stateModule.BOOTSTRAP_BRANCH,
-                  base: process.env.SQUAD_BOOTSTRAP_DEFAULT_BRANCH,
-                  body: payload.pr_body,
-                  draft: true,
-                });
+                let created;
+                try {
+                  created = await github.rest.pulls.create({
+                    ...context.repo,
+                    title: stateModule.BOOTSTRAP_PR_TITLE,
+                    head: stateModule.BOOTSTRAP_BRANCH,
+                    base: process.env.SQUAD_BOOTSTRAP_DEFAULT_BRANCH,
+                    body: payload.pr_body,
+                    draft: true,
+                  });
+                } catch (prError) {
+                  if (!stateModule.isCreatePullRequestPermissionDenied(prError)) {
+                    throw prError;
+                  }
+                  core.warning(`Squad bootstrap could not create the Cast pull request: ${prError.message}`);
+                  const pushedRef = await getRef(`heads/${stateModule.BOOTSTRAP_BRANCH}`);
+                  if (!pushedRef) {
+                    throw new Error(
+                      'Squad bootstrap cannot fall back to a manual pull request link because the candidate branch was not pushed.',
+                    );
+                  }
+                  const repository = `${context.repo.owner}/${context.repo.repo}`;
+                  const compareUrl = stateModule.buildBootstrapPrFallbackCompareUrl({
+                    repository,
+                    baseBranch: process.env.SQUAD_BOOTSTRAP_DEFAULT_BRANCH,
+                    headBranch: stateModule.BOOTSTRAP_BRANCH,
+                    title: stateModule.BOOTSTRAP_PR_TITLE,
+                    server: process.env.GITHUB_SERVER_URL,
+                  });
+                  const existingFallback = stateModule.findExistingBootstrapPrFallbackIssue(
+                    snapshot.issues,
+                    stateModule.BOOTSTRAP_BRANCH,
+                  );
+                  if (existingFallback) {
+                    core.info(
+                      `A fallback issue already requests manual Cast pull request creation: ${existingFallback.html_url}`,
+                    );
+                    return;
+                  }
+                  const runUrl = `${process.env.GITHUB_SERVER_URL || 'https://github.com'}/${repository}/actions/runs/${process.env.SQUAD_BOOTSTRAP_RUN_ID}`;
+                  const fallbackBody = stateModule.buildBootstrapPrFallbackIssueBody({
+                    repository,
+                    baseBranch: process.env.SQUAD_BOOTSTRAP_DEFAULT_BRANCH,
+                    headBranch: stateModule.BOOTSTRAP_BRANCH,
+                    compareUrl,
+                    runUrl,
+                  });
+                  try {
+                    const fallbackIssue = await github.rest.issues.create({
+                      ...context.repo,
+                      title: stateModule.BOOTSTRAP_PR_FALLBACK_ISSUE_TITLE,
+                      body: fallbackBody,
+                    });
+                    core.warning(
+                      `Opened a fallback issue for manual Cast pull request creation: ${fallbackIssue.data.html_url}`,
+                    );
+                    return;
+                  } catch (issueError) {
+                    throw new Error(
+                      `Failed to create the Cast pull request (${prError.message}) and failed to create the ` +
+                        `fallback issue (${issueError.message}).`,
+                    );
+                  }
+                }
                 pullRequest = {
                   number: created.data.number,
                   state: created.data.state,

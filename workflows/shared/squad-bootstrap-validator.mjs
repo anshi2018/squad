@@ -12,6 +12,11 @@ export const BOOTSTRAP_PR_TITLE = '[squad] Cast your Squad';
 export const BOOTSTRAP_ISSUE_TITLE = '[Research Proposals] Agent-discovered repo opportunities';
 export const BOOTSTRAP_ISSUE_MARKER = '<!-- squad:bootstrap-opportunities schema=1 -->';
 export const BOOTSTRAP_RESEARCH_TITLE = '## 🔬 Squad Research — Bootstrap proposals';
+export const CREATE_PR_PERMISSION_DENIED_TEXT =
+  'GitHub Actions is not permitted to create or approve pull requests';
+export const BOOTSTRAP_PR_FALLBACK_ISSUE_TITLE =
+  '[squad] Manual pull request creation required for the Cast branch';
+export const BOOTSTRAP_PR_FALLBACK_ISSUE_MARKER_PREFIX = '<!-- squad:bootstrap-pr-fallback ';
 export const PAYLOAD_CHUNK_BYTES = 6000;
 export const PAYLOAD_MAX_CHUNKS = 16;
 export const PAYLOAD_MAX_BYTES = PAYLOAD_CHUNK_BYTES * PAYLOAD_MAX_CHUNKS;
@@ -241,6 +246,84 @@ export function findBootstrapResearchArtifacts(comments, issueNumber) {
 
 export function isBootstrapResearchSeed(comment) {
   return String(comment?.body ?? '').startsWith(`${BOOTSTRAP_RESEARCH_TITLE}\n`);
+}
+
+// Detects exactly the GitHub Actions "create or approve pull requests" permission
+// error gh-aw's own create_pull_request handler matches on, so every other pull
+// request creation failure still fails closed and propagates unchanged.
+export function isCreatePullRequestPermissionDenied(error) {
+  const message = typeof error?.message === 'string' ? error.message : '';
+  return message.includes(CREATE_PR_PERMISSION_DENIED_TEXT);
+}
+
+export function bootstrapPrFallbackIssueMarker(headBranch) {
+  if (typeof headBranch !== 'string' || headBranch.length === 0) {
+    throw new Error('Bootstrap PR fallback marker requires a head branch.');
+  }
+  return `${BOOTSTRAP_PR_FALLBACK_ISSUE_MARKER_PREFIX}branch=${headBranch} -->`;
+}
+
+// Mirrors gh-aw's own compare-URL construction (per-segment encoding preserves '/'
+// in branch names while still encoding other special characters).
+export function buildBootstrapPrFallbackCompareUrl({ repository, baseBranch, headBranch, title, server }) {
+  if (typeof repository !== 'string' || !/^[^/\s]+\/[^/\s]+$/.test(repository)) {
+    throw new Error('Bootstrap PR fallback requires an owner/repo repository identity.');
+  }
+  if (typeof baseBranch !== 'string' || baseBranch.length === 0) {
+    throw new Error('Bootstrap PR fallback requires a base branch.');
+  }
+  if (typeof headBranch !== 'string' || headBranch.length === 0) {
+    throw new Error('Bootstrap PR fallback requires a head branch.');
+  }
+  const githubServer = typeof server === 'string' && server.length > 0 ? server : 'https://github.com';
+  const encode = (ref) => ref.split('/').map(encodeURIComponent).join('/');
+  const titleParam = typeof title === 'string' && title.length > 0 ? `&title=${encodeURIComponent(title)}` : '';
+  return `${githubServer}/${repository}/compare/${encode(baseBranch)}...${encode(headBranch)}?expand=1${titleParam}`;
+}
+
+// Idempotency guard: finds an already-open fallback issue bound to the exact head
+// branch so reruns cannot spam duplicate manual-PR-creation issues. A previously
+// closed fallback issue (human dismissal) does not suppress a fresh one.
+export function findExistingBootstrapPrFallbackIssue(issues, headBranch) {
+  if (!Array.isArray(issues)) {
+    throw new Error('Bootstrap PR fallback dedupe requires an issues array.');
+  }
+  const marker = bootstrapPrFallbackIssueMarker(headBranch);
+  const matches = issues.filter(
+    (issue) => issue?.state === 'open' && typeof issue?.body === 'string' && issue.body.includes(marker),
+  );
+  if (matches.length > 1) {
+    throw new Error('Ambiguous bootstrap PR fallback issues: found multiple open matches for the same branch.');
+  }
+  return matches[0] ?? null;
+}
+
+export function buildBootstrapPrFallbackIssueBody({ repository, baseBranch, headBranch, compareUrl, runUrl }) {
+  if (typeof repository !== 'string' || repository.length === 0) {
+    throw new Error('Bootstrap PR fallback issue requires a repository.');
+  }
+  if (typeof compareUrl !== 'string' || !compareUrl.startsWith('https://')) {
+    throw new Error('Bootstrap PR fallback issue requires a compare URL.');
+  }
+  const marker = bootstrapPrFallbackIssueMarker(headBranch);
+  const runLine = typeof runUrl === 'string' && runUrl.length > 0 ? `\n\nTriggering run: ${runUrl}` : '';
+  return (
+    `${marker}\n` +
+    '## GitHub Actions permission required\n\n' +
+    `Squad bootstrap pushed the \`${headBranch}\` branch to \`${repository}\` (base \`${baseBranch}\`) but could ` +
+    'not open the pull request because this repository does not allow GitHub Actions to create or approve pull ' +
+    'requests.\n\n' +
+    '### Create the pull request manually\n\n' +
+    `${compareUrl}\n\n` +
+    '### Restore automated pull request creation (optional)\n\n' +
+    '1. Go to **Settings** → **Actions** → **General**\n' +
+    '2. Under **Workflow permissions**, check **Allow GitHub Actions to create and approve pull requests**\n' +
+    '3. Click **Save**\n\n' +
+    'Squad intentionally keeps this setting disabled by default so that no workflow can self-approve its own ' +
+    'pull request; enabling it restores automated Cast PR creation but also grants Actions the ability to ' +
+    'approve pull requests, so only do this if you accept that trade-off.' +
+    runLine
+  );
 }
 
 export function classifyBootstrapState({ pullRequests, issues, comments, defaultBranch }) {

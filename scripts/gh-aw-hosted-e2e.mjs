@@ -402,7 +402,7 @@ export function authorizeTarget(args, sourceInfo, contract, github = githubAdapt
   }
   const workflowPermissions = ghJson(['api', `repos/${target}/actions/permissions/workflow`]);
   if (workflowPermissions.default_workflow_permissions !== 'read'
-    || workflowPermissions.can_approve_pull_request_reviews !== true) {
+    || workflowPermissions.can_approve_pull_request_reviews !== false) {
     throw new Error('Target Actions permissions do not match the supported secure configuration.');
   }
   const baseline = assertPristineTarget(target, info.default_branch, contract, github);

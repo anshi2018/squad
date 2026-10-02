@@ -56,6 +56,30 @@ safe-outputs:
             context.payload,
             process.env.SQUAD_EVENT_NAME,
           );
+          if (result.status === 'accepted' || result.status === 'rejected') {
+            // A bot-authored issue or comment body is never a trusted Squad
+            // command, open mode or not: open modes (`status`, `review`,
+            // `research`, `plan`, `revoke-improvement`) intentionally skip
+            // the permission check below, so without this guard any bot that
+            // reposts or quotes `/squad` text (for example a relay, mirror,
+            // or notification bot) could replay it into a real dispatch with
+            // no identity check at all. The one documented bot-authored
+            // exception -- the bootstrap-opportunities issue -- is excluded
+            // above this step's own `if:` trigger and never reaches here,
+            // and a relayed continuation always arrives through
+            // `squad.lock.yml`'s own `workflow_dispatch` input, never
+            // through this issues/issue_comment router. So any bot-authored
+            // text that does reach this point is always untrusted.
+            const commandAuthorTypeCandidate = process.env.SQUAD_EVENT_NAME === 'issue_comment'
+              ? context.payload.comment?.user?.type
+              : process.env.SQUAD_EVENT_NAME === 'issues'
+                ? context.payload.issue?.user?.type
+                : null;
+            if (commandAuthorTypeCandidate === 'Bot') {
+              core.info('Ignoring a /squad command discovered in bot-authored issue or comment text.');
+              return;
+            }
+          }
           const issueNumber = Number(context.payload.issue?.number);
           if (!Number.isInteger(issueNumber) || issueNumber <= 0) {
             core.setFailed('Squad command discovery requires a valid issue or pull request number.');

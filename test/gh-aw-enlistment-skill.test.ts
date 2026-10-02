@@ -246,7 +246,8 @@ describe('gh-aw-enlistment skill', () => {
     });
 
     it('installs one immutable native package with the 8/17/1 topology', () => {
-      expect(content).toContain('SQUAD_SHA="$(gh api repos/bradygaster/squad/commits/dev');
+      expect(content).toContain(': "${SQUAD_SHA:?STOP: set SQUAD_SHA to an explicit, maintainer-approved 40-character Squad commit SHA before installing.}"');
+      expect(content).not.toContain('commits/dev');
       expect(content).toContain('^' + '[0-9a-f]{40}' + '$');
       expect(content).toContain('gh aw add "bradygaster/squad/workflows@${SQUAD_SHA}"');
       expect(content).toContain('exactly eight workflows, seventeen runtime resources, and one');
