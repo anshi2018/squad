@@ -185,7 +185,7 @@
       "package_destination": ".github/aw/squad/runtime/shared/implementation-provenance-v1.schema.json",
       "destination": ".github/workflows/shared/implementation-provenance-v1.schema.json",
       "ownership": "manifest",
-      "sha256": "9f0cbbd0929d3621e76420f516d3e448de2d77031f5fd8f7e2eb1bd443fa91a8"
+      "sha256": "c4ebb0a2b8fc2d0ee5e6bb77c28bee814cb8cd90acd4bda69cf0d8f23a614e7f"
     },
     {
       "path": "shared/builtins/scribe-charter.md",
