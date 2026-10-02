@@ -372,7 +372,9 @@ gh pr checks --watch
 ### 9. Verify the native review contract after merge
 
 The installation PR remains an explicit human trust boundary. After a human
-merges it, inspect the automatically opened Cast PR and require the native
+merges it, inspect the Cast PR — automatically opened, or manually opened by a
+human from the bootstrap fallback issue's compare-URL link when
+`GITHUB_TOKEN` cannot create it directly — and require the native
 `Squad Review / review` job from the base-controlled `pull_request_target`
 workflow to succeed. Verify the exact workflow path, immutable base/workflow
 SHA, PR base/head, run ID and attempt, successful `review` job, and exact-head
@@ -517,7 +519,8 @@ gh pr merge --squash                # auto-merge before human review. NEVER.
 - ❌ **Clobbering existing workflows.** The install is additive; preserve unrelated
   `.github/workflows/` files.
 - ❌ **Widening the default token.** Keep `default_workflow_permissions=read`.
-- ❌ **Auto-merging.** The workflow-installation PR and automatic Cast PR are
-  both human-reviewed. The dedicated bootstrap wakes only after installation
-  lands on the default branch.
+- ❌ **Auto-merging.** The workflow-installation PR and the Cast PR (automatic
+  or manually opened from the fallback issue) are both human-reviewed. The
+  dedicated bootstrap wakes only after installation lands on the default
+  branch.
 - ❌ **Opening the PR before the package verifier and strict compile pass.**

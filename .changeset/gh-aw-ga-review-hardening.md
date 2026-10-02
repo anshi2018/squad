@@ -28,3 +28,5 @@ No stable release is published by this change. Real (non-mocked) `gh aw compile 
 
 Also updated `docs/src/content/docs/guide/gh-aw.md`, `.github/agents.md`, `README.md` (removed a stale, contradictory `@dev`-tracking note left over from before the explicit-`SQUAD_SHA` policy), and all five synchronized copies of `skills/gh-aw-enlistment/SKILL.md` to describe the fallback-issue-first Cast PR flow instead of an unconditionally automatic one.
 
+A second hosted-review pass on this same commit flagged two remaining stale passages the first doc pass missed: the `skills/gh-aw-enlistment/SKILL.md` anti-pattern list still said "automatic Cast PR" unconditionally, and the `docs/src/content/docs/guide/gh-aw.md` activation-canary/automatic-bootstrap checklist rows still described only the unconditional-automatic case (including when the linked research-proposals issue is created). Both are now corrected to cover the manual-fallback path and its provenance requirement.
+
