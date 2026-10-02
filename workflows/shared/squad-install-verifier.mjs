@@ -26,6 +26,8 @@ export const MIN_GH_AW_VERSION = 'v0.89.22';
 export const OWNERSHIP_ENTRY_COUNT = 26;
 export const OWNERSHIP_DESTINATION =
   '.github/aw/packages/bradygaster-squad-workflows-3632054824e8.json';
+export const UNOWNED_MUTABLE_ROUTER_SKILL =
+  '.github/skills/agentic-workflows/SKILL.md';
 export const TRIGGER_PROBE = 'shared/squad-bootstrap-trigger-probe.json';
 export const TRIGGER_PROBE_DESTINATION =
   '.github/workflows/shared/squad-bootstrap-trigger-probe.json';
@@ -768,6 +770,15 @@ function verifyInstalledBytes(root, contract, revision) {
   }
 }
 
+function verifyUnownedMutableRouterAbsent(root) {
+  const path = safePath(root, UNOWNED_MUTABLE_ROUTER_SKILL);
+  if (existsSync(path)) {
+    throw new Error(
+      `Unowned mutable gh-aw router skill must be removed: ${UNOWNED_MUTABLE_ROUTER_SKILL}`,
+    );
+  }
+}
+
 function verifyTriggerNamespace(root) {
   const directory = '.github/workflows/shared';
   const files = readdirSync(safePath(root, directory));
@@ -879,6 +890,7 @@ export function verifyInstall(root, { expectedRevision = '', strictCompile = fal
     const { contract } = parseInstalledContract(root);
     revision = verifyOwnership(root, contract, expectedRevision);
     verifyInstalledBytes(root, contract, revision);
+    verifyUnownedMutableRouterAbsent(root);
     verifyTriggerNamespace(root);
     verifyTriggerProbe(root, revision);
     if (strictCompile) strictCompileMatches(root);
@@ -917,7 +929,11 @@ export function verifyStagedInstall(root, { expectedRevision = '', stageOwnershi
     // Snapshot the index, not HEAD or the working tree, including unchanged tracked files.
     const tree = spawnChecked('git', ['write-tree'], root).stdout.trim();
     // Exact allowlisted paths bound output; no recursion into unrelated or substituted trees.
-    const entries = spawnChecked('git', ['ls-tree', '-z', tree, '--', ...required], root).stdout
+    const entries = spawnChecked(
+      'git',
+      ['ls-tree', '-z', tree, '--', ...required, UNOWNED_MUTABLE_ROUTER_SKILL],
+      root,
+    ).stdout
       .split('\0').filter(Boolean);
     const staged = new Map(entries.map(entry => {
       const tab = entry.indexOf('\t');
@@ -934,6 +950,11 @@ export function verifyStagedInstall(root, { expectedRevision = '', stageOwnershi
       if (sha256(bytes) !== digest) {
         throw new Error(`Staged digest mismatch for ${path}; stage the verified file before commit/push.`);
       }
+    }
+    if (staged.has(UNOWNED_MUTABLE_ROUTER_SKILL)) {
+      throw new Error(
+        `Unowned mutable gh-aw router skill remains in staged tree: ${UNOWNED_MUTABLE_ROUTER_SKILL}`,
+      );
     }
   } catch (error) {
     result.failures.push(error instanceof Error ? error.message : String(error));
@@ -1016,6 +1037,7 @@ function recoveryMessage(revision) {
   return [
     'Safe recovery:',
     `  gh aw add ${PACKAGE_NAME}@${ref} --force`,
+    `  rm -f ${UNOWNED_MUTABLE_ROUTER_SKILL}`,
     '  gh aw compile --strict',
     '  node .github/workflows/shared/squad-install-verifier.mjs --verify-install --strict-compile',
   ].join('\n');
