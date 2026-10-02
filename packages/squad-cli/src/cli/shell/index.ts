@@ -21,8 +21,8 @@ import type { SquadSession } from '@bradygaster/squad-sdk/client';
 import type { SquadPermissionHandler } from '@bradygaster/squad-sdk/client';
 import { RateLimitError } from '@bradygaster/squad-sdk/adapter/errors';
 import type { ShellMessage } from './types.js';
-import { FSStorageProvider, initSquadTelemetry, TIMEOUTS, StreamingPipeline, UsageLedger, estimateCost, recordAgentSpawn, recordAgentDuration, recordAgentError, recordAgentDestroy, RuntimeEventBus, resolveSquad, resolveSquadState, resolveGlobalSquadPath, loadDirConfig, resolveExternalStateDir } from '@bradygaster/squad-sdk';
-import type { UsageEvent } from '@bradygaster/squad-sdk';
+import { DEFAULT_CONTEXT_WARNING_THRESHOLD, FSStorageProvider, initSquadTelemetry, TIMEOUTS, StreamingPipeline, UsageLedger, estimateCost, recordAgentSpawn, recordAgentDuration, recordAgentError, recordAgentDestroy, RuntimeEventBus, resolveSquad, resolveSquadState, resolveGlobalSquadPath, loadDirConfig, resolveExternalStateDir } from '@bradygaster/squad-sdk';
+import type { ContextUsageEvent, ContextUtilizationSnapshot, UsageEvent } from '@bradygaster/squad-sdk';
 import { enableShellMetrics, recordShellSessionDuration, recordAgentResponseLatency, recordShellError } from './shell-metrics.js';
 import { parseAgentFromDescription } from './agent-name-parser.js';
 import { buildCoordinatorPrompt, buildInitModePrompt, parseCoordinatorResponse, hasRosterEntries } from './coordinator.js';
@@ -94,6 +94,15 @@ function debugLog(...args: unknown[]): void {
   if (process.env['SQUAD_DEBUG'] === '1') {
     console.error('[SQUAD_DEBUG]', ...args);
   }
+}
+
+/** Parse the shell context warning threshold, falling back to 80%. */
+export function parseContextWarningThreshold(value: string | undefined): number {
+  if (value === undefined || value.trim() === '') return DEFAULT_CONTEXT_WARNING_THRESHOLD;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 && parsed <= 1
+    ? parsed
+    : DEFAULT_CONTEXT_WARNING_THRESHOLD;
 }
 
 /** Options for ghost response retry. */
@@ -230,8 +239,31 @@ export async function runShell(): Promise<void> {
     debugLog('🔭 Telemetry active — exporting to ' + process.env['OTEL_EXPORTER_OTLP_ENDPOINT']);
   }
 
-  // Streaming pipeline for token usage and response latency metrics
-  const streamingPipeline = new StreamingPipeline();
+  // Shell-level observability metrics (auto-enabled when OTel is configured)
+  const shellMetricsActive = enableShellMetrics();
+  if (shellMetricsActive) {
+    debugLog('shell observability metrics enabled');
+  }
+
+  // Initialize lifecycle — discover team agents
+  const lifecycle = new ShellLifecycle({ teamRoot, renderer, registry });
+  try {
+    await lifecycle.initialize();
+  } catch (err) {
+    debugLog('lifecycle.initialize() failed:', err);
+    // Non-fatal: shell works without discovered agents
+  }
+
+  // Create SDK client (auto-connects on first session creation)
+  const client = new SquadClient({ cwd: teamRoot });
+  const modelContextWindows = new Map<string, number>();
+  const rawContextWarningThreshold = process.env['SQUAD_CONTEXT_WARNING_THRESHOLD'];
+  const contextWarningThreshold = parseContextWarningThreshold(rawContextWarningThreshold);
+  const streamingPipeline = new StreamingPipeline({
+    eventBus,
+    contextWarningThreshold,
+    resolveContextWindow: model => modelContextWindows.get(model),
+  });
   let usageLedger: UsageLedger | undefined;
   let usageLedgerWarningShown = false;
   let usageTurnSequence = 0;
@@ -254,24 +286,31 @@ export async function runShell(): Promise<void> {
   streamingPipeline.onUsage(async (event) => {
     await persistUsage(ledger => ledger.append(event));
   });
-
-  // Shell-level observability metrics (auto-enabled when OTel is configured)
-  const shellMetricsActive = enableShellMetrics();
-  if (shellMetricsActive) {
-    debugLog('shell observability metrics enabled');
+  if (
+    rawContextWarningThreshold
+    && (
+      !Number.isFinite(Number(rawContextWarningThreshold))
+      || Number(rawContextWarningThreshold) <= 0
+      || Number(rawContextWarningThreshold) > 1
+    )
+  ) {
+    debugLog(
+      'invalid SQUAD_CONTEXT_WARNING_THRESHOLD; using default',
+      DEFAULT_CONTEXT_WARNING_THRESHOLD,
+    );
   }
-
-  // Initialize lifecycle — discover team agents
-  const lifecycle = new ShellLifecycle({ teamRoot, renderer, registry });
-  try {
-    await lifecycle.initialize();
-  } catch (err) {
-    debugLog('lifecycle.initialize() failed:', err);
-    // Non-fatal: shell works without discovered agents
-  }
-
-  // Create SDK client (auto-connects on first session creation)
-  const client = new SquadClient({ cwd: teamRoot });
+  void client.listModels()
+    .then(models => {
+      for (const model of models) {
+        const contextWindow = model.capabilities.limits.max_context_window_tokens;
+        if (Number.isInteger(contextWindow) && contextWindow > 0) {
+          modelContextWindows.set(model.id, contextWindow);
+          modelContextWindows.set(model.name, contextWindow);
+        }
+      }
+      debugLog('loaded context windows for', modelContextWindows.size, 'models');
+    })
+    .catch(err => debugLog('model context-window discovery failed:', err));
 
   let shellApi: ShellApi | undefined;
   let origAddMessage: ((msg: ShellMessage) => void) | undefined;
@@ -279,6 +318,24 @@ export async function runShell(): Promise<void> {
   let coordinatorSession: SquadSession | null = null;
   let activeInitSession: SquadSession | null = null;
   let pendingCastConfirmation: { proposal: CastProposal; parsed: ParsedInput } | null = null;
+
+  streamingPipeline.onContextUtilization((snapshot: ContextUtilizationSnapshot) => {
+    const percentage = (snapshot.utilization * 100).toFixed(1);
+    debugLog('context utilization', {
+      sessionId: snapshot.sessionId,
+      agentName: snapshot.agentName,
+      model: snapshot.model,
+      percentage,
+      source: snapshot.source,
+    });
+    if (!snapshot.thresholdCrossed) return;
+    const owner = snapshot.agentName ?? 'Session';
+    shellApi?.addMessage({
+      role: 'system',
+      content: `⚠ ${owner} context window is ${percentage}% full (${snapshot.occupiedTokens.toLocaleString()} / ${snapshot.contextWindowTokens.toLocaleString()} tokens, ${snapshot.source}).`,
+      timestamp: snapshot.timestamp,
+    });
+  });
 
   // Eager SDK warm-up — start coordinator session before user's first message
   // This runs in background so UI renders immediately
@@ -334,6 +391,29 @@ export async function runShell(): Promise<void> {
     const result = typeof val === 'string' ? val : '';
     debugLog('extractDelta', { type: event['type'], keys: Object.keys(event), hasDeltaContent: 'deltaContent' in event, result: result.slice(0, 80) });
     return result;
+  }
+
+  function createContextUsageHandler(
+    sessionId: string,
+    agentName: string,
+  ): (event: { type: string; [key: string]: unknown }) => void {
+    return event => {
+      const currentTokens = event['currentTokens'];
+      const tokenLimit = event['tokenLimit'];
+      if (typeof currentTokens !== 'number' || typeof tokenLimit !== 'number') return;
+      void streamingPipeline.processEvent({
+        type: 'context_usage',
+        sessionId,
+        agentName,
+        currentTokens,
+        tokenLimit,
+        messagesLength: typeof event['messagesLength'] === 'number' ? event['messagesLength'] : undefined,
+        conversationTokens: typeof event['conversationTokens'] === 'number' ? event['conversationTokens'] : undefined,
+        systemTokens: typeof event['systemTokens'] === 'number' ? event['systemTokens'] : undefined,
+        toolDefinitionsTokens: typeof event['toolDefinitionsTokens'] === 'number' ? event['toolDefinitionsTokens'] : undefined,
+        timestamp: new Date(),
+      } as ContextUsageEvent);
+    };
   }
 
   /**
@@ -509,9 +589,11 @@ export async function runShell(): Promise<void> {
         timestamp: new Date(),
       } as UsageEvent);
     };
+    const onContextUsage = createContextUsageHandler(sid, agentName);
 
     session.on('message_delta', onDelta);
     try { session.on('usage', onUsage); } catch { /* event may not exist */ }
+    try { session.on('context_usage', onContextUsage); } catch { /* event may not exist */ }
     // Listen for tool/activity events to show Copilot-style hints
     const onToolCall = (event: { type: string; [key: string]: unknown }): void => {
       const toolName = event['toolName'] ?? event['name'] ?? event['tool'];
@@ -554,6 +636,7 @@ export async function runShell(): Promise<void> {
     } finally {
       try { session.off('message_delta', onDelta); } catch { /* session may not support off */ }
       try { session.off('usage', onUsage); } catch { /* ignore */ }
+      try { session.off('context_usage', onContextUsage); } catch { /* ignore */ }
       try { session.off('tool_call', onToolCall); } catch { /* ignore */ }
       // Record agent duration and destroy metrics
       const durationMs = Date.now() - dispatchStartMs;
@@ -712,6 +795,7 @@ export async function runShell(): Promise<void> {
         timestamp: new Date(),
       } as UsageEvent);
     };
+    const onCoordContextUsage = createContextUsageHandler(coordSid, 'coordinator');
 
     // Listen for tool/activity events (same pattern as dispatchToAgent)
     const onToolCall = (event: { type: string; [key: string]: unknown }): void => {
@@ -749,6 +833,7 @@ export async function runShell(): Promise<void> {
     // Wire event listeners BEFORE sending the message to ensure we catch all events
     activeCoordSession.on('message_delta', onDelta);
     try { activeCoordSession.on('usage', onCoordUsage); } catch { /* event may not exist */ }
+    try { activeCoordSession.on('context_usage', onCoordContextUsage); } catch { /* event may not exist */ }
     try { activeCoordSession.on('tool_call', onToolCall); } catch { /* event may not exist */ }
     debugLog('coordinator message_delta + usage + tool_call listeners registered');
     try {
@@ -780,6 +865,7 @@ export async function runShell(): Promise<void> {
         debugLog('coordinator message_delta listener removed');
       } catch { /* session may not support off */ }
       try { activeCoordSession.off('usage', onCoordUsage); } catch { /* ignore */ }
+      try { activeCoordSession.off('context_usage', onCoordContextUsage); } catch { /* ignore */ }
       try { activeCoordSession.off('tool_call', onToolCall); } catch { /* ignore */ }
       // Record coordinator duration and destroy metrics
       const coordDurationMs = Date.now() - coordStartMs;
