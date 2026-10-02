@@ -53,7 +53,7 @@ afterAll(() => {
 /** Every Markdown file this repo distributes through `gh aw add`. */
 function distributedWorkflowFiles(): string[] {
   const entrypoints = readdirSync(WORKFLOWS_DIR)
-    .filter((name) => name.endsWith('.md'))
+    .filter((name) => name.endsWith('.md') && name !== 'README.md')
     .map((name) => join(WORKFLOWS_DIR, name));
   const shared = readdirSync(SHARED_DIR)
     .filter((name) => name.endsWith('.md'))
@@ -149,7 +149,7 @@ describe('gh-aw: distributed workflows survive the public `gh aw add` security s
     expect(names).toContain('squad-retro.md');
     expect(names).toContain('squad-improvement-worker.md');
     expect(names).toContain('squad-bootstrap.md');
-    expect(names.filter(name => !name.includes('/') && !name.includes('\\'))).toHaveLength(7);
+    expect(names.filter(name => !name.includes('/') && !name.includes('\\'))).toHaveLength(8);
     expect(names.some((n) => n.split(/[\\/]/)[0] === 'shared')).toBe(true);
   });
 
