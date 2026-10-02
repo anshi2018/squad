@@ -278,16 +278,18 @@ unchanged bootstrap-provenance error:
 - the fallback issue is open, bot-authored, carries the expected title and
   branch marker, and was never edited after creation (`updated_at ===
   created_at`);
-- exactly one such open fallback issue exists for the branch (no ambiguity or
-  duplicates);
+- exactly one such *bot-authored, correctly titled, valid-provenance* open
+  fallback issue exists for the branch — an issue missing any of those
+  qualifiers is excluded before counting, so it can neither suppress the real
+  fallback issue nor manufacture ambiguity;
 - the issue's signed record parses and its `repository`, `base_branch`,
   `head_branch`, and `head_sha` fields exactly match the live pull request,
   and its `compare_url` exactly matches the reconstructed expected link;
 - the issue was created at or before the pull request (it cannot be
   backdated to retroactively legitimize an unrelated PR); and
 - the record's referenced bootstrap run is a successful `push`-triggered run
-  of the bootstrap workflow, in this repository, targeting the same base
-  branch.
+  of the bootstrap workflow, in this repository, whose `head_sha` matches the
+  pull request's exact base commit (not merely the same base branch name).
 
 Every other review, provenance, content, and head-pinning check this workflow
 performs is unchanged — this exception replaces only the pull-request-author

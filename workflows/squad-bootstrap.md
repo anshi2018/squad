@@ -161,7 +161,7 @@ pre-agent-steps:
       # BEGIN GENERATED RESOURCE DIGESTS
       check_hash "$install_verifier" "cf474be9b04d339f7e7a18c65e776b8a53e84bea5b4b85abfe65ed11f7b782ce"
       check_hash "$cast_validator" "c6d0b92aac71dc6f6d5727cac418a323b0bc9c12047400faa12d96150d548ada"
-      check_hash "$bootstrap_validator" "50c5cfd85592b8080a2c4a3cb22d84cbbe50684171e16d86cdaca4b44be55c29"
+      check_hash "$bootstrap_validator" "cdfdb8a719c8fdafba9b10aaab8d3fddc994a02d1538822b5fbe57ec717f6f06"
       # END GENERATED RESOURCE DIGESTS
       node "$bootstrap_validator" \
         --encode-payload "${GITHUB_WORKSPACE:?}/.github/workflows/squad-bootstrap-payload.json" \

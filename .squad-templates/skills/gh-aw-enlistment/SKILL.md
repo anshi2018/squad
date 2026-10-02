@@ -399,11 +399,19 @@ the workflow installation is merged and the post-merge Cast canary succeeds.
 - **Never** merge the bootstrap PR yourself. Merge happens **only** after human
   approval.
 - Make the two-PR flow explicit to the user: after the workflow-installation PR
-  reaches the default branch, `squad-bootstrap` automatically creates one
-  **draft, human-reviewed Cast PR** and one linked
-  `[Research Proposals] Agent-discovered repo opportunities` issue from the same
-  validated repository analysis. The user reviews and merges the Cast PR, then
-  follows the issue's `/squad research`, `/squad triage`, `/squad plan`, and
+  reaches the default branch, `squad-bootstrap` normally creates one **draft,
+  human-reviewed Cast PR** and one linked
+  `[Research Proposals] Agent-discovered repo opportunities` issue from the
+  same validated repository analysis. If `can_approve_pull_request_reviews`
+  is `false` (the recommended, least-privilege setting from step 4),
+  `GITHUB_TOKEN` cannot open that PR either; `squad-bootstrap` instead opens a
+  **bot-authored fallback issue** carrying a signed provenance record and a
+  ready-to-click compare URL, and Squad Review accepts the resulting
+  manually-opened PR in that one narrowly-scoped case (see "Optional: PAT
+  fallback" and the fallback-issue provenance contract in
+  `docs/src/content/docs/guide/gh-aw.md` for the exact trust conditions).
+  Either way, the user reviews and merges the Cast PR, then follows the
+  research issue's `/squad research`, `/squad triage`, `/squad plan`, and
   `/squad activate` instructions until assignable implementation issues exist.
 
 ## Examples

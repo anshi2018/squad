@@ -212,11 +212,16 @@ async function validateBootstrapPrFallbackAttribution(env, get, repository, pr, 
     'bootstrap PR fallback provenance compare URL does not match the expected manual link');
   requireThat(timestamp(fallbackIssue.created_at) <= timestamp(pr.created_at),
     'bootstrap PR fallback issue was created after this pull request');
+  // Mirrors validateBootstrapAttribution's run.head_sha === pr.base.sha check below: without
+  // it, a fallback issue's provenance.run_id only has to name *some* historical successful
+  // bootstrap run on the same base branch, not the run that actually produced the exact base
+  // commit this PR is targeting. Binding run.head_sha to pr.base.sha closes that gap.
   const run = await get(`repos/${repository}/actions/runs/${provenance.run_id}`);
   requireThat(
     run.event === 'push' &&
     run.path === BOOTSTRAP_WORKFLOW &&
     run.repository?.full_name === repository &&
+    run.head_sha === pr.base.sha &&
     run.head_branch === provenance.base_branch &&
     (!requireRunSuccess || (run.status === 'completed' && run.conclusion === 'success')),
     requireRunSuccess

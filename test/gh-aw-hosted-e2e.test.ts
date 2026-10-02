@@ -123,12 +123,27 @@ const currentOutputs = (
 // Mirrors workflows/shared/squad-bootstrap-validator.mjs's bootstrapPrFallbackIssueMarker /
 // buildBootstrapPrFallbackIssueBody, independently re-derived (not imported) so this test does
 // not trust the module it is meant to catch regressions in.
-const fallbackCompareUrl = 'https://github.com/owner/consumer/compare/main...squad/bootstrap-cast?expand=1';
+const fallbackCompareUrl =
+  'https://github.com/owner/consumer/compare/main...squad/bootstrap-cast'
+  + '?expand=1&title=%5Bsquad%5D%20Cast%20your%20Squad';
+const fallbackProvenanceMarker = (overrides: Record<string, unknown> = {}) => (
+  `<!-- squad:bootstrap-pr-fallback-provenance ${JSON.stringify({
+    schema: 1,
+    repository: 'owner/consumer',
+    run_id: String(bootstrapRun.databaseId),
+    base_branch: 'main',
+    head_branch: 'squad/bootstrap-cast',
+    head_sha: CAST_SHA,
+    compare_url: fallbackCompareUrl,
+    ...overrides,
+  })} -->`
+);
 const currentFallbackIssue = {
   number: 22,
   url: 'https://example.test/issues/22',
   title: '[squad] Manual pull request creation required for the Cast branch',
   body: `<!-- squad:bootstrap-pr-fallback branch=squad/bootstrap-cast -->\n`
+    + `${fallbackProvenanceMarker()}\n`
     + '## GitHub Actions permission required\n\n'
     + `Squad bootstrap pushed the \`squad/bootstrap-cast\` branch to \`owner/consumer\` (base \`main\`) but could `
     + 'not open the pull request because this repository does not allow GitHub Actions to create or approve pull '
@@ -684,13 +699,45 @@ describe('Squad gh-aw hosted E2E manual pull request fallback outcome', () => {
     )).toThrow(/Cast branch was not pushed/);
   });
 
-  it('rejects a fallback issue missing the expected compare URL', () => {
+  it('rejects a fallback issue whose provenance compare URL does not match the expected link', () => {
+    const badBody = currentFallbackIssue.body.replace(
+      fallbackCompareUrl,
+      'https://example.test/not-a-compare-url',
+    );
     expect(() => selectBootstrapFallback(
-      currentFallbackOutputs({ ...currentFallbackIssue, body: currentFallbackIssue.body.replace(fallbackCompareUrl, 'https://example.test/not-a-compare-url') }),
+      currentFallbackOutputs({ ...currentFallbackIssue, body: badBody }),
       baseline,
       installation,
       bootstrapRun,
-    )).toThrow(/expected compare URL/);
+    )).toThrow(/provenance does not match the current bootstrap run/);
+  });
+
+  it('rejects a fallback issue missing the full signed provenance record (regression: marker + compare URL text alone is not sufficient)', () => {
+    // Before this fix, selectBootstrapFallback accepted any issue carrying the plain-text branch
+    // marker and a compare-URL substring, even with no signed provenance record at all -- a shape
+    // production's own validateBootstrapPrFallbackAttribution would always reject. Stripping only
+    // the provenance marker line (keeping the marker and the human-readable compare link intact)
+    // proves the E2E now independently enforces the same full-record requirement.
+    const noProvenanceBody = currentFallbackIssue.body.replace(`${fallbackProvenanceMarker()}\n`, '');
+    expect(() => selectBootstrapFallback(
+      currentFallbackOutputs({ ...currentFallbackIssue, body: noProvenanceBody }),
+      baseline,
+      installation,
+      bootstrapRun,
+    )).toThrow(/must contain exactly one bootstrap pull request fallback provenance marker/);
+  });
+
+  it('rejects a fallback issue whose provenance run_id does not match the current bootstrap run (regression: stale/unrelated run binding)', () => {
+    const staleBody = currentFallbackIssue.body.replace(
+      fallbackProvenanceMarker(),
+      fallbackProvenanceMarker({ run_id: '29' }),
+    );
+    expect(() => selectBootstrapFallback(
+      currentFallbackOutputs({ ...currentFallbackIssue, body: staleBody }),
+      baseline,
+      installation,
+      bootstrapRun,
+    )).toThrow(/provenance does not match the current bootstrap run/);
   });
 
   it('fails closed on duplicate current-run fallback issues', () => {
@@ -805,17 +852,18 @@ describe('Squad gh-aw hosted E2E manual pull request fallback outcome', () => {
   });
 
   it('a malformed fallback-issue body still fails closed under source mutation (regression anchor)', () => {
-    // Mutation-kill anchor for selectBootstrapFallback's marker/compare-URL checks: this proves
-    // the guard is reachable and actually enforced, not merely declared. If either check were
-    // deleted or inverted, this issue (whose body intentionally omits the compare URL fragment)
-    // would be wrongly accepted instead of throwing.
-    const malformed = { ...currentFallbackIssue, body: currentFallbackIssue.body.split('### Create')[0] };
+    // Mutation-kill anchor for selectBootstrapFallback's provenance checks: this proves the guard
+    // is reachable and actually enforced, not merely declared. If the provenance parse/compare were
+    // deleted or inverted, this issue (whose body intentionally omits the provenance record and the
+    // compare-URL section entirely) would be wrongly accepted instead of throwing.
+    const malformed = { ...currentFallbackIssue, body: currentFallbackIssue.body.split('### Create')[0].replace(`${fallbackProvenanceMarker()}\n`, '') };
     expect(() => selectBootstrapFallback(
       currentFallbackOutputs(malformed),
       baseline,
       installation,
       bootstrapRun,
-    )).toThrow(/expected compare URL/);
+    )).toThrow(/must contain exactly one bootstrap pull request fallback provenance marker/);
   });
 });
+
 

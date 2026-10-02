@@ -45,6 +45,11 @@ const PROVENANCE_MARKER_PATTERN = /^<!-- squad:bootstrap-provenance (\{[^\r\n]+\
 // (mirroring squad-bootstrap-validator.mjs) so the E2E does not trust the module under test.
 const BOOTSTRAP_PR_FALLBACK_ISSUE_TITLE = '[squad] Manual pull request creation required for the Cast branch';
 const BOOTSTRAP_PR_FALLBACK_MARKER_PATTERN = /^<!-- squad:bootstrap-pr-fallback branch=(\S+) -->/;
+// Independently re-derives squad-bootstrap-validator.mjs's BOOTSTRAP_PR_FALLBACK_PROVENANCE_PREFIX
+// shape without importing it, for the same "do not trust the module under test" reason as
+// PROVENANCE_MARKER_PATTERN above.
+const BOOTSTRAP_PR_FALLBACK_PROVENANCE_MARKER_PATTERN =
+  /^<!-- squad:bootstrap-pr-fallback-provenance (\{[^\r\n]+\}) -->$/gm;
 const ACTIONS_BOT_LOGIN = 'github-actions[bot]';
 const ACTIONS_BOT_ID = 41898282;
 const SAFE_CHILD_ENV = Object.freeze([
@@ -482,6 +487,41 @@ function parseBootstrapProvenance(body, label) {
   return marker;
 }
 
+// Independently validates the full signed fallback-provenance record (mirrors
+// parseBootstrapProvenance's role above for the Cast PR path, and squad-bootstrap-validator.mjs's
+// parseBootstrapPrFallbackProvenance in production -- re-implemented here, not imported, so this
+// E2E cannot be fooled by a bug shared with the module under test). Requires exactly one
+// well-formed record binding repository, run_id, base_branch, head_branch, head_sha, and
+// compare_url; a fallback issue containing only the plain-text branch marker and a matching
+// compare-URL substring (but no valid signed record) must fail this check, because production's
+// own review guard would likewise refuse to trust it.
+function parseBootstrapPrFallbackProvenance(body, label) {
+  const matches = [...String(body ?? '').matchAll(BOOTSTRAP_PR_FALLBACK_PROVENANCE_MARKER_PATTERN)];
+  if (matches.length !== 1) {
+    throw new Error(`${label} must contain exactly one bootstrap pull request fallback provenance marker.`);
+  }
+  let record;
+  try {
+    record = JSON.parse(matches[0][1]);
+  } catch {
+    throw new Error(`${label} bootstrap pull request fallback provenance marker is malformed.`);
+  }
+  const keys = Object.keys(record).sort();
+  const expectedKeys = ['base_branch', 'compare_url', 'head_branch', 'head_sha', 'repository', 'run_id', 'schema'];
+  if (JSON.stringify(keys) !== JSON.stringify(expectedKeys)
+    || record.schema !== 1
+    || typeof record.repository !== 'string'
+    || typeof record.run_id !== 'string'
+    || !/^[1-9][0-9]*$/.test(record.run_id)
+    || typeof record.base_branch !== 'string' || record.base_branch.length === 0
+    || typeof record.head_branch !== 'string' || record.head_branch.length === 0
+    || !SHA_PATTERN.test(String(record.head_sha ?? ''))
+    || typeof record.compare_url !== 'string' || !record.compare_url.startsWith('https://')) {
+    throw new Error(`${label} bootstrap pull request fallback provenance marker is malformed.`);
+  }
+  return record;
+}
+
 function sameAuthor(actual, expected) {
   return actual?.login === expected.login
     && actual?.id === expected.id
@@ -604,9 +644,24 @@ export function selectBootstrapFallback(outputs, baseline, installation, bootstr
   if (!outputs.castBranchSha || !SHA_PATTERN.test(outputs.castBranchSha)) {
     throw new Error('Bootstrap fallback issue exists but the Cast branch was not pushed.');
   }
-  const expectedCompareFragment = `/compare/${baseline.defaultBranch}...${CAST_BRANCH}`;
-  if (!String(fallbackIssue.body ?? '').includes(expectedCompareFragment)) {
-    throw new Error('Bootstrap fallback issue does not link to the expected compare URL.');
+  // Independently parses and binds the full signed provenance record -- not just the plain-text
+  // branch marker and a compare-URL substring -- so a hosted E2E run cannot report success for a
+  // fallback issue that production's own validateBootstrapPrFallbackAttribution would reject.
+  const provenance = parseBootstrapPrFallbackProvenance(fallbackIssue.body, 'Bootstrap fallback issue');
+  const expectedCompareUrl =
+    `https://github.com/${outputs.target}/compare/${baseline.defaultBranch}...${CAST_BRANCH}` +
+    `?expand=1&title=${encodeURIComponent(CAST_PR_TITLE)}`;
+  const expectedProvenance = {
+    schema: 1,
+    repository: outputs.target,
+    run_id: String(bootstrapRun.databaseId),
+    base_branch: baseline.defaultBranch,
+    head_branch: CAST_BRANCH,
+    head_sha: outputs.castBranchSha,
+    compare_url: expectedCompareUrl,
+  };
+  if (JSON.stringify(provenance) !== JSON.stringify(expectedProvenance)) {
+    throw new Error('Bootstrap fallback issue provenance does not match the current bootstrap run.');
   }
   return { fallbackIssue, castBranchSha: outputs.castBranchSha };
 }

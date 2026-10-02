@@ -68,9 +68,9 @@
       "source": "workflows/package/squad-bootstrap.md",
       "destination": ".github/workflows/squad-bootstrap.md",
       "lock": ".github/workflows/squad-bootstrap.lock.yml",
-      "source_sha256": "96d224e3138d9fc4d799b50eb06b1ec391436a702963f408d613aa971c1c68bb",
-      "lock_sha256": "91db7ea212f17708938c0eea5992ec1d8cdc6a72b41d013707064d5f7fb2466a",
-      "package_lock_sha256": "0770304be38aed71e941867e10299c2e81f2ee21cdc4d9ce60c6741f6da7ec9d"
+      "source_sha256": "e89697117aa51d185d35940832a0e4ddba9f5aa00faabf8e7887a8347a885e21",
+      "lock_sha256": "d1bcf8d12bc6ff324c2b43c13cdb4216d4c0ec9bfbd8fdbf0e3ce0c7506990e0",
+      "package_lock_sha256": "87ac6c5304d5a1eb19784902605840dac126c430491a5feef2db07e762d28338"
     },
     {
       "name": "squad-command-router",
@@ -89,7 +89,7 @@
       "package_destination": ".github/workflows/shared/squad-review-guard.mjs",
       "destination": ".github/workflows/shared/squad-review-guard.mjs",
       "ownership": "manifest",
-      "sha256": "27f0e0fd2f77fd55bc82149141b0ea4f2f0befe92753be02514e67a78a994a74"
+      "sha256": "12f9ed1d391cadaf08eb2022ddb91150457856054970ba292a0c5f7f573c1c82"
     },
     {
       "path": "shared/squad-install-verifier.mjs",
@@ -121,7 +121,7 @@
       "package_destination": ".github/workflows/shared/squad-bootstrap-validator.mjs",
       "destination": ".github/workflows/shared/squad-bootstrap-validator.mjs",
       "ownership": "manifest",
-      "sha256": "50c5cfd85592b8080a2c4a3cb22d84cbbe50684171e16d86cdaca4b44be55c29"
+      "sha256": "cdfdb8a719c8fdafba9b10aaab8d3fddc994a02d1538822b5fbe57ec717f6f06"
     },
     {
       "path": "shared/squad-improvement-gate.mjs",
@@ -225,7 +225,7 @@
       "name": "gh-aw-enlistment",
       "source": "workflows/skills/gh-aw-enlistment/SKILL.md",
       "destination": ".github/skills/gh-aw-enlistment/SKILL.md",
-      "sha256": "e99573d3812aca84f59bee9941b3413c7a4475d56647d3a9c713da180e5cfa32"
+      "sha256": "515b6d1881662b140f9fb8a60685f5343352521ca837410756eca1f0127220ed"
     }
   ],
   "bootstrap": {

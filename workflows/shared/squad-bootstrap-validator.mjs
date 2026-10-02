@@ -357,14 +357,31 @@ export function buildBootstrapPrFallbackCompareUrl({ repository, baseBranch, hea
 // Idempotency guard: finds an already-open fallback issue bound to the exact head
 // branch so reruns cannot spam duplicate manual-PR-creation issues. A previously
 // closed fallback issue (human dismissal) does not suppress a fresh one.
+//
+// Candidates are filtered to canonical bot-authored, correctly titled, valid-provenance
+// issues *before* counting matches: the marker text is a plain HTML-comment substring
+// with no signature, so without this filter any repository participant able to open an
+// issue could post a forged marker to either silently suppress creation of the real
+// fallback issue (this function returning their forgery, causing the caller to skip
+// issue creation) or manufacture an ambiguity error once a legitimate fallback issue
+// also exists. Requiring bot authorship, the exact fallback title, and a structurally
+// valid provenance record closes both paths; only a genuinely duplicated legitimate
+// fallback issue (e.g. from a race between two runs) can still trigger the ambiguity
+// error below.
 export function findExistingBootstrapPrFallbackIssue(issues, headBranch) {
   if (!Array.isArray(issues)) {
     throw new Error('Bootstrap PR fallback dedupe requires an issues array.');
   }
   const marker = bootstrapPrFallbackIssueMarker(headBranch);
-  const matches = issues.filter(
-    (issue) => issue?.state === 'open' && typeof issue?.body === 'string' && issue.body.includes(marker),
-  );
+  const matches = issues.filter((issue) => (
+    issue?.state === 'open' &&
+    issue?.user?.login === 'github-actions[bot]' &&
+    issue?.user?.type === 'Bot' &&
+    issue?.title === BOOTSTRAP_PR_FALLBACK_ISSUE_TITLE &&
+    typeof issue?.body === 'string' &&
+    issue.body.includes(marker) &&
+    parseBootstrapPrFallbackProvenance(issue.body) !== null
+  ));
   if (matches.length > 1) {
     throw new Error('Ambiguous bootstrap PR fallback issues: found multiple open matches for the same branch.');
   }

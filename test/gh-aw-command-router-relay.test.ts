@@ -97,6 +97,8 @@ async function runRouter({
   action,
   actor,
   author,
+  authorType,
+  senderType,
   body,
   permissions,
   scriptMutation,
@@ -105,20 +107,23 @@ async function runRouter({
   action: 'opened' | 'edited' | 'reopened' | 'created';
   actor: string;
   author?: string;
+  authorType?: string;
+  senderType?: string;
   body: string;
   permissions: Record<string, string>;
   scriptMutation?: (script: string) => string;
 }): Promise<RouterRun> {
   const extracted = extractScript(ROUTER, 'Route or reject discovered command');
   const inlined = inlineCommandContract(scriptMutation ? scriptMutation(extracted) : extracted);
+  const authorUser = author === undefined ? undefined : { login: author, type: authorType ?? 'User' };
   const textSource = {
     number: 4242,
     ...(eventName === 'issues'
-      ? { body, ...(author === undefined ? {} : { user: { login: author } }) }
+      ? { body, ...(authorUser === undefined ? {} : { user: authorUser }) }
       : {}),
   };
   const comment = eventName === 'issue_comment'
-    ? { id: 55001, body, ...(author === undefined ? {} : { user: { login: author } }) }
+    ? { id: 55001, body, ...(authorUser === undefined ? {} : { user: authorUser }) }
     : undefined;
   const context = {
     repo: { owner: 'bradygaster', repo: 'squad' },
@@ -128,6 +133,7 @@ async function runRouter({
       issue: textSource,
       ...(comment ? { comment } : {}),
       repository: { default_branch: 'dev' },
+      sender: { login: actor, type: senderType ?? 'User' },
     },
   };
   let dispatchedInputs: Record<string, string> | null = null;
@@ -547,5 +553,117 @@ describe('gh-aw: mutating router authorization is bound to text provenance', () 
     } finally {
       rmSync(workspace, { recursive: true, force: true });
     }
+  });
+});
+
+describe('gh-aw: bot-authored /squad command text is never replayed as a trusted command', () => {
+  // Regression coverage for the finding that no prior test populated `user.type` or
+  // `payload.sender.type`, so the router's bot-authorship block (`commandAuthorTypeCandidate
+  // === 'Bot' || commandSenderTypeCandidate === 'Bot'`) was declared in source but never actually
+  // exercised by this harness -- a mutation deleting or inverting it would have gone undetected.
+
+  it.each([
+    ['issues', 'opened'],
+    ['issues', 'edited'],
+    ['issue_comment', 'created'],
+    ['issue_comment', 'edited'],
+  ] as const)('ignores a /squad command whose original author is a bot (%s.%s)', async (eventName, action) => {
+    const result = await runRouter({
+      eventName,
+      action,
+      actor: 'relay-bot',
+      author: 'relay-bot',
+      authorType: 'Bot',
+      senderType: 'Bot',
+      body: 'Please run this request.\n/squad cast',
+      permissions: {},
+    });
+
+    expect(result.failure).toBeNull();
+    expect(result.dispatchedInputs).toBeNull();
+    expect(result.postedComments).toEqual([]);
+    expect(result.permissionLookups).toEqual([]);
+  });
+
+  it('ignores an edited comment whose current sender is a bot, even when the original comment author was human', async () => {
+    // A bot editing someone else's human-authored comment to inject a command must still be
+    // blocked: `commandAuthorTypeCandidate` (the original author) alone would miss this, which is
+    // exactly why the router also checks `context.payload.sender`.
+    const result = await runRouter({
+      eventName: 'issue_comment',
+      action: 'edited',
+      actor: 'editing-bot',
+      author: 'human-author',
+      authorType: 'User',
+      senderType: 'Bot',
+      body: 'Please run this request.\n/squad cast',
+      permissions: { 'human-author': 'write' },
+    });
+
+    expect(result.failure).toBeNull();
+    expect(result.dispatchedInputs).toBeNull();
+    expect(result.postedComments).toEqual([]);
+    expect(result.permissionLookups).toEqual([]);
+  });
+
+  it('still routes a human-authored, human-sent command (control case proving the bot checks are additive, not blanket)', async () => {
+    const result = await runRouter({
+      eventName: 'issue_comment',
+      action: 'created',
+      actor: 'maintainer',
+      author: 'maintainer',
+      authorType: 'User',
+      senderType: 'User',
+      body: 'Please run this request.\n/squad cast',
+      permissions: { maintainer: 'write' },
+    });
+
+    expect(result.failure).toBeNull();
+    expect(result.dispatchedInputs).toMatchObject({ command: 'cast', issue_number: '4242' });
+  });
+
+  it('kills the mutation that drops the bot-authorship block entirely', async () => {
+    const dedentedMarker = "if (commandAuthorTypeCandidate === 'Bot' || commandSenderTypeCandidate === 'Bot') {\n"
+      + "    core.info('Ignoring a /squad command discovered in bot-authored issue or comment text.');\n"
+      + '    return;\n'
+      + '  }';
+    expect(extractScript(ROUTER, 'Route or reject discovered command')).toContain(dedentedMarker);
+
+    const vulnerable = await runRouter({
+      eventName: 'issue_comment',
+      action: 'created',
+      actor: 'relay-bot',
+      author: 'relay-bot',
+      authorType: 'Bot',
+      senderType: 'Bot',
+      body: 'Please run this request.\n/squad cast',
+      permissions: { 'relay-bot': 'write' },
+      scriptMutation: script => {
+        expect(script).toContain(dedentedMarker);
+        return script.replace(dedentedMarker, '');
+      },
+    });
+    expect(vulnerable.dispatchedInputs).toMatchObject({ command: 'cast' });
+  });
+
+  it('kills the mutation that checks only the original author type and ignores the current sender', async () => {
+    const marker = "commandAuthorTypeCandidate === 'Bot' || commandSenderTypeCandidate === 'Bot'";
+    expect(extractScript(ROUTER, 'Route or reject discovered command')).toContain(marker);
+
+    const vulnerable = await runRouter({
+      eventName: 'issue_comment',
+      action: 'edited',
+      actor: 'editing-bot',
+      author: 'human-author',
+      authorType: 'User',
+      senderType: 'Bot',
+      body: 'Please run this request.\n/squad cast',
+      permissions: { 'human-author': 'write', 'editing-bot': 'write' },
+      scriptMutation: script => {
+        expect(script).toContain(marker);
+        return script.replace(marker, "commandAuthorTypeCandidate === 'Bot'");
+      },
+    });
+    expect(vulnerable.dispatchedInputs).toMatchObject({ command: 'cast' });
   });
 });

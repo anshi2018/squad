@@ -600,8 +600,6 @@ git push
 `gh aw add` compiles the workflows automatically. If it reports unapproved
 safe-update changes, review them and run `gh aw compile --approve`.
 
-> `@dev` pulls the latest modes and fixes; switch to `@main` once gh-aw support is stable.
-
 Review the complete generated diff before you commit:
 
 | Path | What gh-aw writes | Commit? |

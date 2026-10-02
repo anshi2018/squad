@@ -1176,6 +1176,36 @@ describe('gh-aw: squad-bootstrap pull-request-creation permission-denied fallbac
     return { result, ...args };
   }
 
+  /**
+   * A dedupe candidate must be bot-authored, correctly titled, and carry a structurally valid
+   * provenance record (see findExistingBootstrapPrFallbackIssue) to count as "already filed".
+   * Builds one that matches this harness's fixed repo/branch/run-id/head-SHA defaults.
+   */
+  function validFallbackIssue(overrides: { body?: string; user?: Record<string, unknown> } = {}) {
+    const compareUrl = buildBootstrapPrFallbackCompareUrl({
+      repository: 'octo/example',
+      baseBranch: 'main',
+      headBranch: BOOTSTRAP_BRANCH,
+      title: BOOTSTRAP_PR_TITLE,
+      server: 'https://github.com',
+    });
+    const provenanceLine = buildBootstrapPrFallbackProvenanceLine({
+      repository: 'octo/example',
+      runId: '123',
+      baseBranch: 'main',
+      headBranch: BOOTSTRAP_BRANCH,
+      headSha: 'b'.repeat(40),
+      compareUrl,
+    });
+    return {
+      state: 'open',
+      html_url: 'https://github.com/octo/example/issues/9',
+      user: overrides.user ?? { login: 'github-actions[bot]', type: 'Bot' },
+      title: BOOTSTRAP_PR_FALLBACK_ISSUE_TITLE,
+      body: overrides.body ?? `${bootstrapPrFallbackIssueMarker(BOOTSTRAP_BRANCH)}\n${provenanceLine}\n${compareUrl}`,
+    };
+  }
+
   it('creates the Cast pull request normally when GitHub Actions is permitted (no fallback invoked)', async () => {
     const { result, issuesCreateCalls } = await run();
     expect((result as { number: number }).number).toBe(3);
@@ -1231,11 +1261,7 @@ describe('gh-aw: squad-bootstrap pull-request-creation permission-denied fallbac
   });
 
   it('dedupes reruns: an already-open fallback issue suppresses a duplicate issue', async () => {
-    const existingIssue = {
-      state: 'open',
-      html_url: 'https://github.com/octo/example/issues/9',
-      body: `${bootstrapPrFallbackIssueMarker(BOOTSTRAP_BRANCH)}\nprevious fallback`,
-    };
+    const existingIssue = validFallbackIssue();
     const { result, issuesCreateCalls, info } = await run({
       pullsCreate: async () => {
         throw permissionDeniedError();
@@ -1248,11 +1274,7 @@ describe('gh-aw: squad-bootstrap pull-request-creation permission-denied fallbac
   });
 
   it('does not dedupe against a closed fallback issue (a human dismissal does not suppress a fresh report)', async () => {
-    const closedIssue = {
-      state: 'closed',
-      html_url: 'https://github.com/octo/example/issues/9',
-      body: `${bootstrapPrFallbackIssueMarker(BOOTSTRAP_BRANCH)}\nprevious fallback`,
-    };
+    const closedIssue = { ...validFallbackIssue(), state: 'closed' };
     const { issuesCreateCalls } = await run({
       pullsCreate: async () => {
         throw permissionDeniedError();
@@ -1260,6 +1282,47 @@ describe('gh-aw: squad-bootstrap pull-request-creation permission-denied fallbac
       issues: [closedIssue],
     });
     expect(issuesCreateCalls).toHaveLength(1);
+  });
+
+  it('regression: a non-bot-authored decoy issue carrying only the marker cannot suppress or forge dedupe (forgery proof)', async () => {
+    // Any repository participant able to open an issue can post the plain-text branch marker;
+    // without bot-authorship + title + provenance filtering, this decoy would be treated as
+    // "already filed" and silently swallow the real fallback issue the workflow should create.
+    const decoyIssue = {
+      state: 'open',
+      html_url: 'https://github.com/octo/example/issues/404',
+      user: { login: 'attacker', type: 'User' },
+      title: 'totally unrelated issue',
+      body: `${bootstrapPrFallbackIssueMarker(BOOTSTRAP_BRANCH)}\nno provenance here, just the marker text`,
+    };
+    const { issuesCreateCalls, warnings } = await run({
+      pullsCreate: async () => {
+        throw permissionDeniedError();
+      },
+      issues: [decoyIssue],
+    });
+    expect(issuesCreateCalls).toHaveLength(1);
+    expect(warnings.some((message) => message.includes('Opened a fallback issue'))).toBe(true);
+  });
+
+  it('regression: a decoy issue does not manufacture ambiguity alongside one genuine fallback issue', async () => {
+    const genuineIssue = validFallbackIssue();
+    const decoyIssue = {
+      state: 'open',
+      html_url: 'https://github.com/octo/example/issues/404',
+      user: { login: 'attacker', type: 'User' },
+      title: BOOTSTRAP_PR_FALLBACK_ISSUE_TITLE,
+      body: `${bootstrapPrFallbackIssueMarker(BOOTSTRAP_BRANCH)}\nno valid provenance`,
+    };
+    const { result, issuesCreateCalls, info } = await run({
+      pullsCreate: async () => {
+        throw permissionDeniedError();
+      },
+      issues: [genuineIssue, decoyIssue],
+    });
+    expect(result).toBeUndefined();
+    expect(issuesCreateCalls).toHaveLength(0);
+    expect(info.some((message) => message.includes('already requests manual Cast pull request creation'))).toBe(true);
   });
 
   it('confirms the branch was actually pushed before falling back (regression: no silent fallback on a failed push)', async () => {
@@ -1351,17 +1414,52 @@ describe('gh-aw: squad-bootstrap pull-request fallback pure helpers (unit + muta
     ).toThrow();
   });
 
-  it('finds an existing open fallback issue by branch-bound marker and fails closed on ambiguity', () => {
+  it('finds an existing open fallback issue by branch-bound marker, authorship, title, and provenance; fails closed on ambiguity', () => {
     const marker = bootstrapPrFallbackIssueMarker(BOOTSTRAP_BRANCH);
-    const open = { state: 'open', body: `${marker}\nmore`, html_url: 'u1' };
+    const compareUrl = buildBootstrapPrFallbackCompareUrl({
+      repository: 'octo/example',
+      baseBranch: 'main',
+      headBranch: BOOTSTRAP_BRANCH,
+      title: BOOTSTRAP_PR_TITLE,
+      server: 'https://github.com',
+    });
+    const provenanceLine = buildBootstrapPrFallbackProvenanceLine({
+      repository: 'octo/example',
+      runId: '123',
+      baseBranch: 'main',
+      headBranch: BOOTSTRAP_BRANCH,
+      headSha: 'b'.repeat(40),
+      compareUrl,
+    });
+    const validIssue = (bodySuffix = '') => ({
+      state: 'open',
+      user: { login: 'github-actions[bot]', type: 'Bot' },
+      title: BOOTSTRAP_PR_FALLBACK_ISSUE_TITLE,
+      body: `${marker}\n${provenanceLine}\n${compareUrl}${bodySuffix}`,
+      html_url: 'u1',
+    });
+    const open = validIssue();
     expect(findExistingBootstrapPrFallbackIssue([], BOOTSTRAP_BRANCH)).toBeNull();
     expect(findExistingBootstrapPrFallbackIssue([open], BOOTSTRAP_BRANCH)).toBe(open);
-    expect(findExistingBootstrapPrFallbackIssue([{ state: 'closed', body: marker }], BOOTSTRAP_BRANCH)).toBeNull();
+    expect(findExistingBootstrapPrFallbackIssue([{ ...open, state: 'closed' }], BOOTSTRAP_BRANCH)).toBeNull();
     expect(findExistingBootstrapPrFallbackIssue([{ state: 'open', body: 'unrelated' }], BOOTSTRAP_BRANCH)).toBeNull();
+    // Forgery proof: a decoy with the marker but wrong authorship, title, or provenance is excluded,
+    // not counted toward ambiguity and not returned as a match.
+    expect(findExistingBootstrapPrFallbackIssue(
+      [{ ...open, user: { login: 'attacker', type: 'User' } }], BOOTSTRAP_BRANCH,
+    )).toBeNull();
+    expect(findExistingBootstrapPrFallbackIssue(
+      [{ ...open, title: 'unrelated title' }], BOOTSTRAP_BRANCH,
+    )).toBeNull();
+    expect(findExistingBootstrapPrFallbackIssue(
+      [{ state: 'open', user: { login: 'github-actions[bot]', type: 'Bot' }, title: BOOTSTRAP_PR_FALLBACK_ISSUE_TITLE, body: `${marker}\nno provenance` }],
+      BOOTSTRAP_BRANCH,
+    )).toBeNull();
     expect(() =>
-      findExistingBootstrapPrFallbackIssue([open, { state: 'open', body: `${marker}\nother` }], BOOTSTRAP_BRANCH),
+      findExistingBootstrapPrFallbackIssue([open, validIssue('\nother')], BOOTSTRAP_BRANCH),
     ).toThrow(/Ambiguous/);
   });
+
 
   it('binds the fallback issue body to the exact compare URL and branch marker', () => {
     const compareUrl = 'https://github.com/octo/example/compare/main...squad%2Fbootstrap-cast?expand=1';
