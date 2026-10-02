@@ -702,6 +702,59 @@ export function waitForBootstrapFallback(
   throw new Error('Timed out waiting for the bootstrap manual pull request fallback issue.');
 }
 
+// Finds the externally (human) created Cast pull request that production's own
+// validateBootstrapPrFallbackAttribution would authorize for this exact fallback issue --
+// re-implemented independently here (not imported, not invoked via any privileged token) so the
+// hosted E2E can *observe* that the human-authorization boundary was actually exercised without
+// ever being able to cross it itself. The E2E must never create this pull request: doing so with
+// any token would substitute automation for the human-in-the-loop step that
+// `can_approve_pull_request_reviews=false` exists to require, defeating the very contract being
+// verified. Only a single, unambiguous, correctly-bound candidate advances; anything else
+// (missing, ambiguous, or mismatched) fails closed and leaves the caller to keep waiting.
+export function selectManualFallbackCastPr(outputs, fallbackIssue) {
+  const provenance = parseBootstrapPrFallbackProvenance(fallbackIssue.body, 'Bootstrap fallback issue');
+  const candidates = outputs.castPrs.filter((pr) => (
+    pr.headRefName === provenance.head_branch
+    && pr.headRepository === outputs.target
+    && pr.baseRefName === provenance.base_branch
+    && pr.title === CAST_PR_TITLE
+    && pr.author?.type === 'User'
+    && Date.parse(pr.createdAt) >= Date.parse(fallbackIssue.createdAt)
+  ));
+  if (candidates.length > 1) {
+    throw new Error(`Ambiguous manually created Cast fallback pull requests: found ${candidates.length}.`);
+  }
+  if (candidates.length !== 1) return null;
+  const [pr] = candidates;
+  if (pr.baseSha !== provenance.base_sha || pr.headSha !== provenance.head_sha) {
+    throw new Error('Manually created Cast fallback pull request does not match the fallback issue provenance.');
+  }
+  if (!outputs.castBranchSha || pr.headSha !== outputs.castBranchSha || !SHA_PATTERN.test(pr.headSha)) {
+    throw new Error('Manually created Cast fallback pull request head SHA does not match the pushed Cast branch.');
+  }
+  return pr;
+}
+
+export function waitForManualFallbackCastPr(
+  target,
+  fallbackIssue,
+  {
+    github = githubAdapter,
+    now = Date.now,
+    pause = sleep,
+    timeoutMs = 20 * 60 * 1000,
+    pollMs = 30_000,
+  } = {},
+) {
+  const deadline = now() + timeoutMs;
+  while (now() < deadline) {
+    const pr = selectManualFallbackCastPr(bootstrapOutputs(target, github), fallbackIssue);
+    if (pr) return pr;
+    pause(pollMs);
+  }
+  throw new Error('Timed out waiting for a human to manually create the Cast fallback pull request.');
+}
+
 // Polls for whichever bootstrap outcome is actually reachable. Under the required
 // `can_approve_pull_request_reviews=false` policy only the fallback-issue outcome is reachable
 // in practice (pull request creation fails closed every time), but both selectors are checked
@@ -1011,6 +1064,18 @@ function hosted(args, repositoryRoot) {
     // gh-aw.md) makes GITHUB_TOKEN pull request creation fail closed, so the 'fallback' outcome
     // is the only one reachable against a target configured per the published setup guidance;
     // the 'pr' branch is retained for an explicitly permissive canary-only target.
+    //
+    // The 'fallback' outcome is deliberately *not* treated as terminal success on its own: the
+    // fallback issue only proves bootstrap correctly detected the permission denial and asked a
+    // human to open the Cast PR. It does not prove that a human-authored PR on that branch would
+    // actually be authorized by validateBootstrapPrFallbackAttribution(), nor that the review
+    // workflow activates for it. The hosted E2E must never create that PR itself with any
+    // token -- that would substitute automation for the human-in-the-loop step the permission
+    // policy exists to require, defeating the very boundary under test. Instead this run performs
+    // one immediate, non-blocking check for an already-existing human-created candidate (useful
+    // only when resumed after one has been opened); if none is found yet, the run ends in the
+    // non-terminal `awaiting_manual_pr` status and persists everything `resume-fallback` needs to
+    // observe the human-created PR later and advance to a true pass without ever creating it.
     const bootstrapSummary = completion.kind === 'pr'
       ? (() => {
           const reviewCanary = waitForBaseControlledReviewCanary(
@@ -1019,6 +1084,7 @@ function hosted(args, repositoryRoot) {
             evidence,
           );
           return {
+            status: 'passed',
             bootstrap_outcome: 'cast_pr',
             review_canary_pr: completion.castPr.number,
             review_canary_check: reviewCanary.check.id,
@@ -1026,10 +1092,44 @@ function hosted(args, repositoryRoot) {
             generated_research_issue: completion.researchIssue.url,
           };
         })()
-      : {
-          bootstrap_outcome: 'fallback_issue',
-          generated_fallback_issue: completion.fallbackIssue.url,
-        };
+      : (() => {
+          const outputs = bootstrapOutputs(targetState.target);
+          const manualCastPr = selectManualFallbackCastPr(outputs, completion.fallbackIssue);
+          if (!manualCastPr) {
+            writeJson(resolve(evidence, 'fallback-awaiting-manual-pr.json'), {
+              fallback_issue: completion.fallbackIssue,
+            });
+            return {
+              status: 'awaiting_manual_pr',
+              bootstrap_outcome: 'fallback_issue',
+              generated_fallback_issue: completion.fallbackIssue.url,
+            };
+          }
+          const reviewCanary = waitForBaseControlledReviewCanary(
+            targetState.target,
+            manualCastPr,
+            evidence,
+          );
+          return {
+            status: 'passed',
+            bootstrap_outcome: 'cast_pr_via_manual_fallback',
+            generated_fallback_issue: completion.fallbackIssue.url,
+            review_canary_pr: manualCastPr.number,
+            review_canary_check: reviewCanary.check.id,
+            generated_cast_pr: manualCastPr.url,
+          };
+        })();
+    if (bootstrapSummary.status === 'awaiting_manual_pr') {
+      writeJson(resolve(evidence, 'summary.json'), {
+        target: targetState.target,
+        source_sha: sourceSha,
+        installation_pr: installation.number,
+        installation_run: installRun.url,
+        ...bootstrapSummary,
+        generated_work_merged: false,
+      });
+      return;
+    }
 
     runChild('git', ['fetch', 'origin', targetState.info.default_branch], { cwd: checkout });
     const probeBranch = `squad-e2e/probe-${process.env.GITHUB_RUN_ID ?? sourceSha.slice(0, 12)}`;
@@ -1108,6 +1208,50 @@ function hosted(args, repositoryRoot) {
   }
 }
 
+// Resumes a prior `hosted` run that ended in the non-terminal `awaiting_manual_pr` status,
+// after a human has (or has not yet) manually opened the Cast pull request the fallback issue
+// asked for. Reads the identity of that prior run (its original baseline, installation, and
+// bootstrap run -- never a freshly recomputed baseline, which would already count the existing
+// fallback issue as pre-existing and break the ">" baseline comparisons every selector relies on)
+// from its persisted evidence, then only *observes* GitHub state through read-only API calls: it
+// never creates, comments on, or otherwise mutates the Cast pull request itself.
+function resumeFallback(args) {
+  const target = requireArg(args, 'target');
+  const evidenceIn = resolve(requireArg(args, 'evidence_in'));
+  const evidence = resolve(requireArg(args, 'evidence'));
+  mkdirSync(evidence, { recursive: true });
+  const priorPreflight = JSON.parse(readFileSync(resolve(evidenceIn, 'preflight.json'), 'utf8'));
+  const priorIdentity = JSON.parse(readFileSync(resolve(evidenceIn, 'installation-identity.json'), 'utf8'));
+  if (priorPreflight.target !== target) {
+    throw new Error('Resume target does not match the target bound to the prior hosted run evidence.');
+  }
+  const { baseline, installation, bootstrapRun } = priorIdentity;
+  const fallbackOutcome = selectBootstrapFallback(
+    bootstrapOutputs(target),
+    baseline,
+    installation,
+    bootstrapRun,
+  );
+  if (!fallbackOutcome) {
+    throw new Error(
+      'The bootstrap fallback issue from the prior hosted run is no longer current; cannot resume.',
+    );
+  }
+  writeJson(resolve(evidence, 'resume-preflight.json'), { target, baseline, installation, bootstrapRun });
+  const manualCastPr = waitForManualFallbackCastPr(target, fallbackOutcome.fallbackIssue);
+  const reviewCanary = waitForBaseControlledReviewCanary(target, manualCastPr, evidence);
+  writeJson(resolve(evidence, 'summary.json'), {
+    status: 'passed',
+    target,
+    bootstrap_outcome: 'cast_pr_via_manual_fallback',
+    generated_fallback_issue: fallbackOutcome.fallbackIssue.url,
+    review_canary_pr: manualCastPr.number,
+    review_canary_check: reviewCanary.check.id,
+    generated_cast_pr: manualCastPr.url,
+    generated_work_merged: false,
+  });
+}
+
 function diagnose(args) {
   const root = resolve(requireArg(args, 'root'));
   const contractRoot = resolve(requireArg(args, 'contract_root'));
@@ -1141,8 +1285,14 @@ export function main(argv = process.argv.slice(2), repositoryRoot = resolve(dirn
     hosted(args, repositoryRoot);
     return 0;
   }
+  if (args.command === 'resume-fallback') {
+    resumeFallback(args);
+    return 0;
+  }
   if (args.command === 'diagnose') return diagnose(args);
-  throw new Error('Usage: gh-aw-hosted-e2e.mjs <source-preflight|hosted|diagnose> [options]');
+  throw new Error(
+    'Usage: gh-aw-hosted-e2e.mjs <source-preflight|hosted|resume-fallback|diagnose> [options]',
+  );
 }
 
 const isMain = process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url);

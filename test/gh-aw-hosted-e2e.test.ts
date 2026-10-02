@@ -10,10 +10,12 @@ import {
   sanitizedEnvironment,
   selectBootstrapFallback,
   selectBootstrapOutputs,
+  selectManualFallbackCastPr,
   waitForBaseControlledReviewCanary,
   waitForBootstrapCompletion,
   waitForBootstrapFallback,
   waitForBootstrapOutputs,
+  waitForManualFallbackCastPr,
 } from '../scripts/gh-aw-hosted-e2e.mjs';
 import {
   assertInstalledManifestIdentity,
@@ -164,6 +166,34 @@ const currentFallbackOutputs = (fallbackIssue = currentFallbackIssue) => ({
   issues: [fallbackIssue],
 });
 
+const HUMAN_AUTHOR = { login: 'a-real-human', id: 583231, type: 'User' };
+const manualCastPr = (overrides: Record<string, unknown> = {}) => ({
+  number: 13,
+  url: 'https://example.test/pr/13',
+  title: '[squad] Cast your Squad',
+  body: 'Opened by hand per the fallback issue instructions.',
+  createdAt: '2026-09-24T20:05:00.000Z',
+  isDraft: false,
+  headRefName: 'squad/bootstrap-cast',
+  headRepository: 'owner/consumer',
+  headSha: CAST_SHA,
+  baseRefName: 'main',
+  baseSha: bootstrapRun.headSha,
+  author: HUMAN_AUTHOR,
+  state: 'open',
+  ...overrides,
+});
+const manualFallbackOutputs = (
+  pr = manualCastPr(),
+  fallbackIssue = currentFallbackIssue,
+) => ({
+  target: 'owner/consumer',
+  expectedAuthor: ACTIONS_BOT,
+  castBranchSha: CAST_SHA,
+  castPrs: [pr],
+  issues: [fallbackIssue],
+});
+
 describe('Squad gh-aw hosted E2E controller', () => {
   it('verifies and narrowly repairs staged ownership metadata before the installation commit', () => {
     const gate = SCRIPT.indexOf('const staged = verifyStagedInstall(checkout,');
@@ -175,15 +205,28 @@ describe('Squad gh-aw hosted E2E controller', () => {
     expect(SCRIPT.slice(gate, commit)).toContain('throw new Error');
   });
 
-  it('uses only a default-branch repository_dispatch controller and one PAT step', () => {
+  it('uses only default-branch repository_dispatch controllers gated by event action', () => {
     const parsed = parse(WORKFLOW);
-    expect(parsed.on.repository_dispatch.types).toEqual(['squad-gh-aw-hosted-e2e']);
+    // Two event types share this controller: the hosted install/bootstrap run, and a
+    // human-observation-only resume that never creates the Cast fallback pull request itself
+    // (see resume-fallback job comment). Both jobs additionally gate on github.event.action so
+    // each only ever runs for its own dispatch, even though both share the `types:` trigger list.
+    expect(parsed.on.repository_dispatch.types).toEqual([
+      'squad-gh-aw-hosted-e2e',
+      'squad-gh-aw-hosted-e2e-resume',
+    ]);
     expect(parsed.on.workflow_dispatch).toBeUndefined();
     expect(WORKFLOW).not.toContain('inputs.source_ref');
     expect(WORKFLOW).toContain("github.ref_name == github.event.repository.default_branch");
+    expect(WORKFLOW).toContain("github.event.action == 'squad-gh-aw-hosted-e2e'");
+    expect(WORKFLOW).toContain("github.event.action == 'squad-gh-aw-hosted-e2e-resume'");
     expect(WORKFLOW).toContain('protected `dev` branch');
-    expect(WORKFLOW.match(/SQUAD_GH_AW_E2E_TOKEN/g)).toHaveLength(2);
+    // One PAT step in each job: the original hosted journey, and resume-fallback's read-only
+    // observation step. Neither job ever uses the PAT to create the Cast fallback pull request.
+    expect(WORKFLOW.match(/SQUAD_GH_AW_E2E_TOKEN/g)).toHaveLength(3);
     expect(parsed.jobs['hosted-e2e'].environment).toBe('squad-gh-aw-e2e');
+    expect(parsed.jobs['resume-fallback'].environment).toBe('squad-gh-aw-e2e');
+    expect(parsed.jobs['resume-fallback'].permissions).toEqual({ contents: 'read', actions: 'read' });
     expect(parsed.permissions).toEqual({ contents: 'read' });
   });
 
@@ -886,6 +929,180 @@ describe('Squad gh-aw hosted E2E manual pull request fallback outcome', () => {
       bootstrapRun,
     )).toThrow(/must contain exactly one bootstrap pull request fallback provenance marker/);
   });
+
+  it('selectManualFallbackCastPr returns null while no human has opened the Cast pull request yet', () => {
+    // Proves the fallback outcome is non-terminal: the fallback issue existing alone is not
+    // success, and selectManualFallbackCastPr must not synthesize or require creating one.
+    expect(selectManualFallbackCastPr(currentFallbackOutputs(), currentFallbackIssue)).toBeNull();
+  });
+
+  it('selectManualFallbackCastPr accepts a valid manually (human) created Cast pull request', () => {
+    const pr = manualCastPr();
+    expect(selectManualFallbackCastPr(manualFallbackOutputs(pr), currentFallbackIssue)).toBe(pr);
+  });
+
+  it('selectManualFallbackCastPr fails closed on a bot-authored look-alike pull request', () => {
+    // A bot-authored PR (even one matching every other field) must never be accepted here: it
+    // would mean something other than a human satisfied the review-gate boundary under test.
+    const pr = manualCastPr({ author: ACTIONS_BOT });
+    expect(selectManualFallbackCastPr(manualFallbackOutputs(pr), currentFallbackIssue)).toBeNull();
+  });
+
+  it('selectManualFallbackCastPr fails closed on an ambiguous set of candidate pull requests', () => {
+    const outputs = {
+      ...manualFallbackOutputs(),
+      castPrs: [manualCastPr(), manualCastPr({ number: 14, url: 'https://example.test/pr/14' })],
+    };
+    expect(() => selectManualFallbackCastPr(outputs, currentFallbackIssue)).toThrow(
+      /Ambiguous manually created Cast fallback pull requests/,
+    );
+  });
+
+  it('selectManualFallbackCastPr fails closed on a pull request opened before the fallback issue', () => {
+    const pr = manualCastPr({ createdAt: '2026-09-24T20:00:00.000Z' });
+    expect(selectManualFallbackCastPr(manualFallbackOutputs(pr), currentFallbackIssue)).toBeNull();
+  });
+
+  it('selectManualFallbackCastPr fails closed on a wrong head branch, base branch, or title', () => {
+    expect(selectManualFallbackCastPr(
+      manualFallbackOutputs(manualCastPr({ headRefName: 'squad/bootstrap-cast-other' })),
+      currentFallbackIssue,
+    )).toBeNull();
+    expect(selectManualFallbackCastPr(
+      manualFallbackOutputs(manualCastPr({ baseRefName: 'dev' })),
+      currentFallbackIssue,
+    )).toBeNull();
+    expect(selectManualFallbackCastPr(
+      manualFallbackOutputs(manualCastPr({ title: 'Cast your Squad (manual)' })),
+      currentFallbackIssue,
+    )).toBeNull();
+  });
+
+  it('selectManualFallbackCastPr fails closed when the SHAs do not match the fallback provenance', () => {
+    // Mutation-kill anchor: the candidate matches on branch/title/author/ordering, but its SHAs
+    // do not match the signed fallback-issue provenance. If the base/head SHA cross-checks were
+    // deleted, this would be wrongly accepted as the authorized pull request.
+    expect(() => selectManualFallbackCastPr(
+      manualFallbackOutputs(manualCastPr({ baseSha: '5'.repeat(40) })),
+      currentFallbackIssue,
+    )).toThrow(/does not match the fallback issue provenance/);
+    expect(() => selectManualFallbackCastPr(
+      manualFallbackOutputs(manualCastPr({ headSha: '6'.repeat(40) })),
+      currentFallbackIssue,
+    )).toThrow(/does not match the fallback issue provenance/);
+  });
+
+  it('selectManualFallbackCastPr fails closed when the head SHA does not match the pushed Cast branch', () => {
+    // Even if a candidate's headSha happens to match the fallback issue's own (forgeable) head_sha
+    // field, it must still be cross-checked against the Cast branch actually pushed by this run.
+    const forgedSha = '7'.repeat(40);
+    const forgedProvenance = fallbackProvenanceMarker({ head_sha: forgedSha });
+    const forgedFallbackIssue = {
+      ...currentFallbackIssue,
+      body: currentFallbackIssue.body.replace(fallbackProvenanceMarker(), forgedProvenance),
+    };
+    const pr = manualCastPr({ headSha: forgedSha });
+    expect(() => selectManualFallbackCastPr(
+      manualFallbackOutputs(pr, forgedFallbackIssue),
+      forgedFallbackIssue,
+    )).toThrow(/does not match the pushed Cast branch/);
+  });
+
+  it('selectManualFallbackCastPr fails closed on a malformed fallback issue under source mutation (regression anchor)', () => {
+    const malformed = {
+      ...currentFallbackIssue,
+      body: currentFallbackIssue.body.replace(`${fallbackProvenanceMarker()}\n`, ''),
+    };
+    expect(() => selectManualFallbackCastPr(currentFallbackOutputs(malformed), malformed)).toThrow(
+      /must contain exactly one bootstrap pull request fallback provenance marker/,
+    );
+  });
+
+  it('waitForManualFallbackCastPr polls until a human opens the Cast pull request, then resolves', () => {
+    let now = 0;
+    let calls = 0;
+    const pr = manualCastPr();
+    const github = {
+      ...fakeGitHub(),
+      listBranches: () => [
+        { name: 'main', sha: TARGET_SHA },
+        { name: 'squad/bootstrap-cast', sha: CAST_SHA },
+      ],
+      listIssues: () => [currentFallbackIssue],
+      listPullRequests: () => {
+        calls += 1;
+        return calls < 2 ? [] : [pr];
+      },
+    };
+    const result = waitForManualFallbackCastPr(
+      'owner/consumer',
+      currentFallbackIssue,
+      {
+        github,
+        now: () => now,
+        pause: (milliseconds: number) => { now += milliseconds; },
+        timeoutMs: 100,
+        pollMs: 10,
+      },
+    );
+    expect(result).toBe(pr);
+    expect(calls).toBeGreaterThanOrEqual(2);
+  });
+
+  it('waitForManualFallbackCastPr times out when no human ever opens the Cast pull request', () => {
+    // Direct proof that the fallback-issue outcome alone is not terminal success: with no pull
+    // request ever appearing, resume must keep failing rather than report success.
+    let now = 0;
+    const github = {
+      ...fakeGitHub(),
+      listBranches: () => [
+        { name: 'main', sha: TARGET_SHA },
+        { name: 'squad/bootstrap-cast', sha: CAST_SHA },
+      ],
+      listIssues: () => [currentFallbackIssue],
+    };
+    expect(() => waitForManualFallbackCastPr(
+      'owner/consumer',
+      currentFallbackIssue,
+      {
+        github,
+        now: () => now,
+        pause: (milliseconds: number) => { now += milliseconds; },
+        timeoutMs: 20,
+        pollMs: 10,
+      },
+    )).toThrow(/Timed out waiting for a human to manually create the Cast fallback pull request/);
+  });
+
+  it('never creates, merges, or approves the manual fallback Cast pull request itself', () => {
+    // Source-level architectural proof for the redesign: the only mutation `hosted()` or
+    // `resumeFallback()` may perform on the fallback path is persisting local evidence files --
+    // never `pr create`/`pr merge`/review-approval calls targeting the Cast fallback boundary.
+    const hostedStart = SCRIPT.indexOf('function hosted(');
+    const hostedEnd = SCRIPT.indexOf('\nfunction ', hostedStart + 1);
+    const hostedBody = SCRIPT.slice(hostedStart, hostedEnd);
+    expect(hostedBody).toContain('awaiting_manual_pr');
+    expect(hostedBody).toContain('selectManualFallbackCastPr');
+    expect(hostedBody).not.toMatch(/'pr',\s*'create'/);
+    expect(hostedBody).not.toMatch(/'pr',\s*'merge'/);
+    expect(hostedBody).not.toMatch(/'pr',\s*'review'/);
+
+    const resumeStart = SCRIPT.indexOf('function resumeFallback(');
+    const resumeEnd = SCRIPT.indexOf('\nfunction ', resumeStart + 1);
+    const resumeBody = SCRIPT.slice(resumeStart, resumeEnd);
+    expect(resumeBody).toContain('waitForManualFallbackCastPr');
+    expect(resumeBody).toContain('waitForBaseControlledReviewCanary');
+    expect(resumeBody).not.toMatch(/'pr',\s*'create'/);
+    expect(resumeBody).not.toMatch(/'pr',\s*'merge'/);
+    expect(resumeBody).not.toMatch(/'pr',\s*'review'/);
+  });
+
+  it('wires resume-fallback into the command dispatcher with its required arguments', () => {
+    expect(SCRIPT).toContain("args.command === 'resume-fallback'");
+    expect(SCRIPT).toContain('resume-fallback');
+    expect(SCRIPT).toMatch(/Usage:.*resume-fallback/);
+  });
 });
+
 
 

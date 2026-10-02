@@ -1140,6 +1140,7 @@ describe('gh-aw: squad-bootstrap pull-request-creation permission-denied fallbac
     pullsCreate?: (...args: unknown[]) => unknown;
     issuesCreate?: (...args: unknown[]) => unknown;
     issues?: unknown[];
+    eventName?: string;
   } = {}) {
     const info: string[] = [];
     const warnings: string[] = [];
@@ -1150,7 +1151,7 @@ describe('gh-aw: squad-bootstrap pull-request-creation permission-denied fallbac
     };
     const snapshot = { state: { pull_request: null }, issues: overrides.issues ?? [] };
     const payload = { files: [{ path: 'a.txt', content: 'hi' }], pr_body: 'body' };
-    const context = { repo: { owner: 'octo', repo: 'example' }, sha: BASE_SHA };
+    const context = { repo: { owner: 'octo', repo: 'example' }, sha: BASE_SHA, eventName: overrides.eventName ?? 'push' };
     const processEnv = {
       env: {
         SQUAD_BOOTSTRAP_DEFAULT_BRANCH: 'main',
@@ -1338,6 +1339,33 @@ describe('gh-aw: squad-bootstrap pull-request-creation permission-denied fallbac
         throw permissionDeniedError();
       },
       issues: [genuineIssue, decoyIssue],
+    });
+    expect(result).toBeUndefined();
+    expect(issuesCreateCalls).toHaveLength(0);
+    expect(info.some((message) => message.includes('already requests manual Cast pull request creation'))).toBe(true);
+  });
+
+  it('rejects minting a fallback issue on a workflow_dispatch run (review-guard only authorizes push-triggered provenance)', async () => {
+    const args = makeArgs({
+      pullsCreate: async () => {
+        throw permissionDeniedError();
+      },
+      eventName: 'workflow_dispatch',
+    });
+    await expect(
+      compiled(args.snapshot, args.payload, stateModule, args.context, args.process, args.github, args.core, args.assertRemotePayload),
+    ).rejects.toThrow(/triggered by 'workflow_dispatch', not 'push'/);
+    expect(args.issuesCreateCalls).toHaveLength(0);
+  });
+
+  it('still reports an existing push-triggered fallback issue from a workflow_dispatch rerun (dedupe is not event-gated)', async () => {
+    const existingIssue = validFallbackIssue();
+    const { result, issuesCreateCalls, info } = await run({
+      pullsCreate: async () => {
+        throw permissionDeniedError();
+      },
+      issues: [existingIssue],
+      eventName: 'workflow_dispatch',
     });
     expect(result).toBeUndefined();
     expect(issuesCreateCalls).toHaveLength(0);

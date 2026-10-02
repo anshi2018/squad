@@ -9,9 +9,19 @@ name: Squad gh-aw hosted E2E
 # - SQUAD_GH_AW_E2E_TARGET_OWNER_ID (numeric owner ID)
 # - SQUAD_GH_AW_E2E_PAT_ACTOR_LOGIN and SQUAD_GH_AW_E2E_PAT_ACTOR_ID
 # The SQUAD_GH_AW_E2E_TOKEN secret is scoped only to that one public consumer.
+#
+# Two event types share this controller:
+# - squad-gh-aw-hosted-e2e: installs the package, triggers bootstrap, and either validates the
+#   Cast PR review canary directly or (the only reachable outcome against the published setup
+#   guidance) reports a non-terminal `awaiting_manual_pr` status once bootstrap opens the manual
+#   pull request fallback issue. It never creates that Cast PR itself.
+# - squad-gh-aw-hosted-e2e-resume: dispatched later, after a human may have opened the Cast PR the
+#   fallback issue asked for. It only observes (read-only) whether that PR exists, matches the
+#   fallback issue's provenance, and was authorized by the base-controlled Squad Review canary --
+#   requires client_payload.evidence_run_id naming the prior hosted-e2e run to resume from.
 on:
   repository_dispatch:
-    types: [squad-gh-aw-hosted-e2e]
+    types: [squad-gh-aw-hosted-e2e, squad-gh-aw-hosted-e2e-resume]
 
 permissions:
   contents: read
@@ -26,6 +36,7 @@ jobs:
     if: >-
       github.repository == 'bradygaster/squad'
       && github.ref_name == github.event.repository.default_branch
+      && github.event.action == 'squad-gh-aw-hosted-e2e'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     environment: squad-gh-aw-e2e
@@ -95,5 +106,73 @@ jobs:
         with:
           name: squad-gh-aw-hosted-e2e-${{ github.run_id }}
           path: ${{ runner.temp }}/squad-gh-aw-hosted-e2e/
+          if-no-files-found: error
+          retention-days: 30
+
+  resume-fallback:
+    name: Observe the manually created Cast fallback pull request
+    # Dispatched after a human has (or may have) opened the Cast pull request a prior
+    # `hosted-e2e` run's fallback issue asked for. This job only *observes* that pull request and
+    # the base-controlled Squad Review canary through read-only API calls -- it never creates,
+    # approves, or otherwise mutates the pull request itself; doing so with any token would
+    # substitute automation for the human-in-the-loop step `can_approve_pull_request_reviews=false`
+    # exists to require. client_payload.evidence_run_id must name the prior `hosted-e2e` run whose
+    # uploaded evidence artifact (containing preflight.json and installation-identity.json) this
+    # run resumes from.
+    if: >-
+      github.repository == 'bradygaster/squad'
+      && github.ref_name == github.event.repository.default_branch
+      && github.event.action == 'squad-gh-aw-hosted-e2e-resume'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: squad-gh-aw-e2e
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 #v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 #v6
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install trusted controller dependencies
+        run: |
+          npm config set registry "https://packagefeedproxy.microsoft.io/npm/"
+          npm ci --ignore-scripts
+
+      - name: Download prior hosted-e2e evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVIDENCE_RUN_ID: ${{ github.event.client_payload.evidence_run_id }}
+        run: |
+          set -euo pipefail
+          test -n "$EVIDENCE_RUN_ID"
+          gh run download "$EVIDENCE_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name "squad-gh-aw-hosted-e2e-$EVIDENCE_RUN_ID" \
+            --dir "$RUNNER_TEMP/squad-gh-aw-hosted-e2e-evidence-in"
+
+      - name: Observe the manually created Cast fallback pull request
+        env:
+          GH_TOKEN: ${{ secrets.SQUAD_GH_AW_E2E_TOKEN }}
+          TARGET_REPOSITORY: ${{ vars.SQUAD_GH_AW_E2E_TARGET_REPOSITORY }}
+        run: |
+          set -euo pipefail
+          node scripts/gh-aw-hosted-e2e.mjs resume-fallback \
+            --target "$TARGET_REPOSITORY" \
+            --evidence-in "$RUNNER_TEMP/squad-gh-aw-hosted-e2e-evidence-in" \
+            --evidence "$RUNNER_TEMP/squad-gh-aw-hosted-e2e-resume"
+
+      - name: Upload resume evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a #v7
+        with:
+          name: squad-gh-aw-hosted-e2e-resume-${{ github.run_id }}
+          path: ${{ runner.temp }}/squad-gh-aw-hosted-e2e-resume/
           if-no-files-found: error
           retention-days: 30

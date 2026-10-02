@@ -519,6 +519,22 @@ safe-outputs:
                     );
                     return;
                   }
+                  // squad-review-guard's validateBootstrapPrFallbackAttribution() only authorizes a
+                  // fallback provenance record whose referenced run has event === 'push' (mirroring
+                  // the bot-authored path's own push-only trust model). A workflow_dispatch run that
+                  // reaches this branch would mint a fallback issue no Cast PR could ever satisfy,
+                  // and future reruns would dedupe against that permanently-unusable issue forever
+                  // (findExistingBootstrapPrFallbackIssue does not consider triggering event). Fail
+                  // closed instead of minting a dead-end issue.
+                  if (context.eventName !== 'push') {
+                    throw new Error(
+                      'Squad bootstrap cannot open a trusted fallback issue because this run was triggered by ' +
+                        `'${context.eventName}', not 'push'. The Squad review workflow only authorizes a Cast ` +
+                        "pull request against a push-triggered bootstrap run's provenance. Re-run this workflow " +
+                        'via a push to a squad-related path on the default branch (for example, merging the ' +
+                        'pending installation changes) so a push-triggered run can open an authorizable fallback issue.',
+                    );
+                  }
                   const runUrl = `${process.env.GITHUB_SERVER_URL || 'https://github.com'}/${repository}/actions/runs/${process.env.SQUAD_BOOTSTRAP_RUN_ID}`;
                   const provenanceLine = stateModule.buildBootstrapPrFallbackProvenanceLine({
                     repository,
