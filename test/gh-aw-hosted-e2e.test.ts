@@ -205,29 +205,20 @@ describe('Squad gh-aw hosted E2E controller', () => {
     expect(SCRIPT.slice(gate, commit)).toContain('throw new Error');
   });
 
-  it('uses only default-branch repository_dispatch controllers gated by event action', () => {
+  it('uses only a default-branch repository_dispatch controller and one PAT step', () => {
     const parsed = parse(WORKFLOW);
-    // Two event types share this controller: the hosted install/bootstrap run, and a
-    // human-observation-only resume that never creates the Cast fallback pull request itself
-    // (see resume-fallback job comment). Both jobs additionally gate on github.event.action so
-    // each only ever runs for its own dispatch, even though both share the `types:` trigger list.
-    expect(parsed.on.repository_dispatch.types).toEqual([
-      'squad-gh-aw-hosted-e2e',
-      'squad-gh-aw-hosted-e2e-resume',
-    ]);
+    // Only one dispatch type, and only one job: the hosted-E2E controller never observes or
+    // validates a human-opened Cast fallback pull request itself (no job, no cross-repository
+    // secret). That is a deliberately operator-driven, local-only step (see `resumeFallback`'s
+    // doc comment in scripts/gh-aw-hosted-e2e.mjs) -- never a GitHub Actions job.
+    expect(parsed.on.repository_dispatch.types).toEqual(['squad-gh-aw-hosted-e2e']);
+    expect(parsed.jobs['resume-fallback']).toBeUndefined();
     expect(parsed.on.workflow_dispatch).toBeUndefined();
     expect(WORKFLOW).not.toContain('inputs.source_ref');
     expect(WORKFLOW).toContain("github.ref_name == github.event.repository.default_branch");
-    expect(WORKFLOW).toContain("github.event.action == 'squad-gh-aw-hosted-e2e'");
-    expect(WORKFLOW).toContain("github.event.action == 'squad-gh-aw-hosted-e2e-resume'");
     expect(WORKFLOW).toContain('protected `dev` branch');
-    // One PAT step in each job (hosted-e2e's journey step, resume-fallback's read-only
-    // observation step), the top-of-file doc comment, and the resume-fallback job's own token-
-    // scoping doc comment. Neither job ever uses the PAT to create the Cast fallback pull request.
-    expect(WORKFLOW.match(/SQUAD_GH_AW_E2E_TOKEN/g)).toHaveLength(4);
+    expect(WORKFLOW.match(/SQUAD_GH_AW_E2E_TOKEN/g)).toHaveLength(2);
     expect(parsed.jobs['hosted-e2e'].environment).toBe('squad-gh-aw-e2e');
-    expect(parsed.jobs['resume-fallback'].environment).toBe('squad-gh-aw-e2e');
-    expect(parsed.jobs['resume-fallback'].permissions).toEqual({ contents: 'read', actions: 'read' });
     expect(parsed.permissions).toEqual({ contents: 'read' });
   });
 
@@ -1075,15 +1066,19 @@ describe('Squad gh-aw hosted E2E manual pull request fallback outcome', () => {
     )).toThrow(/Timed out waiting for a human to manually create the Cast fallback pull request/);
   });
 
-  it('never creates, merges, or approves the manual fallback Cast pull request itself', () => {
-    // Source-level architectural proof for the redesign: the only mutation `hosted()` or
-    // `resumeFallback()` may perform on the fallback path is persisting local evidence files --
-    // never `pr create`/`pr merge`/review-approval calls targeting the Cast fallback boundary.
+  it('never creates, merges, or approves the manual fallback Cast pull request itself, and never calls the target API for it from the hosted job', () => {
+    // Source-level architectural proof for the redesign: `hosted()`'s fallback branch performs no
+    // GitHub API call at all (it only parses the fallback issue's own already-fetched provenance
+    // body) and never mutates anything beyond writing local evidence files. `resumeFallback()` is
+    // a separate, operator-run-only command (see its doc comment) that may *observe* GitHub state
+    // but likewise never issues `pr create`/`pr merge`/review-approval calls.
     const hostedStart = SCRIPT.indexOf('function hosted(');
     const hostedEnd = SCRIPT.indexOf('\nfunction ', hostedStart + 1);
     const hostedBody = SCRIPT.slice(hostedStart, hostedEnd);
     expect(hostedBody).toContain('awaiting_manual_pr');
-    expect(hostedBody).toContain('selectManualFallbackCastPr');
+    expect(hostedBody).toContain('parseBootstrapPrFallbackProvenance');
+    expect(hostedBody).not.toContain('selectManualFallbackCastPr');
+    expect(hostedBody).not.toContain('waitForManualFallbackCastPr');
     expect(hostedBody).not.toMatch(/'pr',\s*'create'/);
     expect(hostedBody).not.toMatch(/'pr',\s*'merge'/);
     expect(hostedBody).not.toMatch(/'pr',\s*'review'/);
@@ -1098,10 +1093,19 @@ describe('Squad gh-aw hosted E2E manual pull request fallback outcome', () => {
     expect(resumeBody).not.toMatch(/'pr',\s*'review'/);
   });
 
-  it('wires resume-fallback into the command dispatcher with its required arguments', () => {
+  it('wires resume-fallback into the command dispatcher as an operator-only local command, never a workflow job', () => {
     expect(SCRIPT).toContain("args.command === 'resume-fallback'");
-    expect(SCRIPT).toContain('resume-fallback');
     expect(SCRIPT).toMatch(/Usage:.*resume-fallback/);
+    // The doc comment directly above `resumeFallback` must say so explicitly, in its own words.
+    const resumeStart = SCRIPT.indexOf('function resumeFallback(');
+    const commentStart = SCRIPT.lastIndexOf('// Resumes a prior', resumeStart);
+    const docComment = SCRIPT.slice(commentStart, resumeStart);
+    expect(docComment).toMatch(/operator-run LOCAL command only/);
+    expect(docComment).toMatch(/never invoked by any GitHub\n?\/\/ ?Actions workflow or repository_dispatch job/);
+    expect(docComment).toMatch(/must never be run with a repository secret/);
+    // And the workflow file itself must not wire it to anything -- no job, no dispatch type.
+    expect(WORKFLOW).not.toContain('resume-fallback');
+    expect(WORKFLOW).not.toContain('resume_fallback');
   });
 
   it('transitively proves every function resumeFallback can reach issues read-only GitHub API calls', () => {
@@ -1109,12 +1113,10 @@ describe('Squad gh-aw hosted E2E manual pull request fallback outcome', () => {
     // from `resumeFallback` (bootstrapOutputs, the githubAdapter block, selectManualFallbackCastPr,
     // waitForManualFallbackCastPr, waitForBaseControlledReviewCanary) and asserts none of those
     // function bodies contain a non-GET `gh api --method`, nor any `pr create`/`pr merge`/`pr
-    // review` subcommand. This is what justifies granting `resumeFallback` -- and the
-    // `resume-fallback` workflow job that only ever invokes it -- the same `SQUAD_GH_AW_E2E_TOKEN`
-    // secret used for mutation elsewhere in this file: the credential is broader than the job
-    // needs (no separate read-only PAT exists for the target fixture repo, and `github.token`
-    // cannot reach a repository outside this one), but every code path this job can execute is
-    // provably GET-only, so the extra authority the token carries is never exercised here.
+    // review` subcommand. `resumeFallback` is an operator-run-only local command (never wired to
+    // any CI job or repository secret -- see its doc comment and the dispatcher-wiring test
+    // above); this proves that whatever GH_TOKEN the operator's own `gh` session supplies, every
+    // code path this command can execute against the target repository is GET-only.
     const extractFunction = (name: string, exported = false) => {
       const needle = exported ? `export function ${name}(` : `function ${name}(`;
       const start = SCRIPT.indexOf(needle);
@@ -1152,25 +1154,24 @@ describe('Squad gh-aw hosted E2E manual pull request fallback outcome', () => {
     }
   });
 
-  it('documents and separately scopes the resume-fallback job\'s tokens from hosted-e2e\'s', () => {
-    const resumeJobStart = WORKFLOW.indexOf('  resume-fallback:');
-    const resumeJob = WORKFLOW.slice(resumeJobStart);
-    // github.token (source-repo-scoped, read-only `actions: read`) fetches only the prior run's
-    // own evidence artifact from this same repository.
-    expect(resumeJob).toMatch(/Download prior hosted-e2e evidence[\s\S]*?GH_TOKEN:\s*\$\{\{\s*github\.token\s*\}\}/);
-    // secrets.SQUAD_GH_AW_E2E_TOKEN is the only credential that can reach the external target
-    // fixture repository at all; the comment above the job and the preceding transitive-call-graph
-    // test both establish that every call it makes through this token is GET-only.
-    expect(resumeJob).toMatch(/Observe the manually created Cast fallback pull request[\s\S]*?GH_TOKEN:\s*\$\{\{\s*secrets\.SQUAD_GH_AW_E2E_TOKEN\s*\}\}/);
-    expect(resumeJob).toMatch(/it never creates,\s*\n?\s*#?\s*approves, or otherwise mutates the pull request itself/);
-    expect(resumeJob).toMatch(/permissions:\s*\n\s*contents:\s*read\s*\n\s*actions:\s*read/);
-
-    const hostedJobStart = WORKFLOW.indexOf('  hosted-e2e:');
-    const hostedJob = WORKFLOW.slice(hostedJobStart, resumeJobStart);
-    expect(hostedJob).toMatch(/Run trusted hosted journey[\s\S]*?GH_TOKEN:\s*\$\{\{\s*secrets\.SQUAD_GH_AW_E2E_TOKEN\s*\}\}/);
-    expect(hostedJob).toMatch(/SOURCE_READ_TOKEN:\s*\$\{\{\s*github\.token\s*\}\}/);
+  it('writes complete awaiting_manual_pr evidence (target, branch/head/base/SHA, compare URL, next step) with no API call', () => {
+    const hostedStart = SCRIPT.indexOf('function hosted(');
+    const hostedEnd = SCRIPT.indexOf('\nfunction ', hostedStart + 1);
+    const hostedBody = SCRIPT.slice(hostedStart, hostedEnd);
+    for (const field of [
+      'target:',
+      'head_branch:',
+      'head_sha:',
+      'base_branch:',
+      'base_sha:',
+      'compare_url:',
+      'next_step:',
+    ]) {
+      expect(hostedBody).toContain(field);
+    }
+    expect(hostedBody).toMatch(/installed Squad.*\n.*Review workflow then validates it locally/);
+    expect(hostedBody).toContain('never a CI job, never a repository secret');
   });
 });
-
 
 

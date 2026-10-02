@@ -1065,17 +1065,20 @@ function hosted(args, repositoryRoot) {
     // is the only one reachable against a target configured per the published setup guidance;
     // the 'pr' branch is retained for an explicitly permissive canary-only target.
     //
-    // The 'fallback' outcome is deliberately *not* treated as terminal success on its own: the
-    // fallback issue only proves bootstrap correctly detected the permission denial and asked a
-    // human to open the Cast PR. It does not prove that a human-authored PR on that branch would
-    // actually be authorized by validateBootstrapPrFallbackAttribution(), nor that the review
-    // workflow activates for it. The hosted E2E must never create that PR itself with any
-    // token -- that would substitute automation for the human-in-the-loop step the permission
-    // policy exists to require, defeating the very boundary under test. Instead this run performs
-    // one immediate, non-blocking check for an already-existing human-created candidate (useful
-    // only when resumed after one has been opened); if none is found yet, the run ends in the
-    // non-terminal `awaiting_manual_pr` status and persists everything `resume-fallback` needs to
-    // observe the human-created PR later and advance to a true pass without ever creating it.
+    // The 'fallback' outcome is deliberately *not* treated as terminal success: the fallback issue
+    // only proves bootstrap correctly detected the permission denial and asked a human to open the
+    // Cast PR. It does not prove a human-authored PR on that branch exists yet, that it would be
+    // authorized by validateBootstrapPrFallbackAttribution(), nor that the review workflow
+    // activates for it. The hosted E2E must never create that PR itself, and must never read the
+    // target repository's pull request/review state with any token to check whether a human has
+    // acted yet either -- both would require a cross-repository credential this job has no
+    // legitimate reason to hold once bootstrap has finished its own job of asking. Everything this
+    // branch needs (repository, fallback issue, exact branch/head/base/SHA binding, and the
+    // compare URL a human must use) is already fully present in the fallback issue's own signed
+    // provenance body, parsed here with zero additional API calls. The run ends immediately,
+    // non-terminal, at `awaiting_manual_pr`; validating a human-opened PR against this evidence is
+    // a separate, explicitly operator-driven step (see `resumeFallback` below), never an
+    // automatic part of this hosted Actions job.
     const bootstrapSummary = completion.kind === 'pr'
       ? (() => {
           const reviewCanary = waitForBaseControlledReviewCanary(
@@ -1093,30 +1096,32 @@ function hosted(args, repositoryRoot) {
           };
         })()
       : (() => {
-          const outputs = bootstrapOutputs(targetState.target);
-          const manualCastPr = selectManualFallbackCastPr(outputs, completion.fallbackIssue);
-          if (!manualCastPr) {
-            writeJson(resolve(evidence, 'fallback-awaiting-manual-pr.json'), {
-              fallback_issue: completion.fallbackIssue,
-            });
-            return {
-              status: 'awaiting_manual_pr',
-              bootstrap_outcome: 'fallback_issue',
-              generated_fallback_issue: completion.fallbackIssue.url,
-            };
-          }
-          const reviewCanary = waitForBaseControlledReviewCanary(
-            targetState.target,
-            manualCastPr,
-            evidence,
+          const provenance = parseBootstrapPrFallbackProvenance(
+            completion.fallbackIssue.body,
+            'Bootstrap fallback issue',
           );
+          writeJson(resolve(evidence, 'fallback-awaiting-manual-pr.json'), {
+            fallback_issue: completion.fallbackIssue,
+            provenance,
+          });
           return {
-            status: 'passed',
-            bootstrap_outcome: 'cast_pr_via_manual_fallback',
+            status: 'awaiting_manual_pr',
+            bootstrap_outcome: 'fallback_issue',
             generated_fallback_issue: completion.fallbackIssue.url,
-            review_canary_pr: manualCastPr.number,
-            review_canary_check: reviewCanary.check.id,
-            generated_cast_pr: manualCastPr.url,
+            target: targetState.target,
+            head_branch: provenance.head_branch,
+            head_sha: provenance.head_sha,
+            base_branch: provenance.base_branch,
+            base_sha: provenance.base_sha,
+            compare_url: provenance.compare_url,
+            next_step:
+              'A human must open the Cast pull request at compare_url, matching this exact '
+              + 'branch/head/base/SHA provenance. The target repository\'s own installed Squad '
+              + 'Review workflow then validates it locally using that repository\'s own '
+              + 'GITHUB_TOKEN/gh-aw authority. To check on the outcome afterward, download this '
+              + 'run\'s evidence artifact and run '
+              + '`node scripts/gh-aw-hosted-e2e.mjs resume-fallback` locally, authenticated as '
+              + 'yourself (operator-driven; never a CI job, never a repository secret).',
           };
         })();
     if (bootstrapSummary.status === 'awaiting_manual_pr') {
@@ -1208,13 +1213,27 @@ function hosted(args, repositoryRoot) {
   }
 }
 
-// Resumes a prior `hosted` run that ended in the non-terminal `awaiting_manual_pr` status,
-// after a human has (or has not yet) manually opened the Cast pull request the fallback issue
-// asked for. Reads the identity of that prior run (its original baseline, installation, and
+// Resumes a prior `hosted` run that ended in the non-terminal `awaiting_manual_pr` status, after
+// a human has (or has not yet) manually opened the Cast pull request the fallback issue asked
+// for. This is intentionally an operator-run LOCAL command only: it is never invoked by any GitHub
+// Actions workflow or repository_dispatch job, and must never be run with a repository secret.
+// Run it from your own workstation, authenticated as yourself (`gh auth login`); `--evidence-in`
+// is a directory you populate yourself first, e.g. via
+// `gh run download <hosted-e2e-run-id> --repo bradygaster/squad \
+//   --name squad-gh-aw-hosted-e2e-<hosted-e2e-run-id> --dir <evidence-in>`
+// against the bradygaster/squad repository you already have read access to. Whatever GH_TOKEN is
+// present in your shell when you run this (your own personal token, never a repo secret) is what
+// it uses to observe the target repository.
+//
+// Reads the identity of that prior run (its original baseline, installation, and
 // bootstrap run -- never a freshly recomputed baseline, which would already count the existing
 // fallback issue as pre-existing and break the ">" baseline comparisons every selector relies on)
 // from its persisted evidence, then only *observes* GitHub state through read-only API calls: it
-// never creates, comments on, or otherwise mutates the Cast pull request itself.
+// never creates, comments on, or otherwise mutates the Cast pull request itself. It also never
+// claims to speak for the target repository's own review outcome: `waitForBaseControlledReviewCanary`
+// here is reading the verdict the target repository's own installed Squad Review workflow already
+// posted, using that repository's own GITHUB_TOKEN/gh-aw authority -- this command only observes
+// that it happened.
 function resumeFallback(args) {
   const target = requireArg(args, 'target');
   const evidenceIn = resolve(requireArg(args, 'evidence_in'));
