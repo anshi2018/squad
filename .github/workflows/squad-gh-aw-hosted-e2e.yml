@@ -119,6 +119,22 @@ jobs:
     # exists to require. client_payload.evidence_run_id must name the prior `hosted-e2e` run whose
     # uploaded evidence artifact (containing preflight.json and installation-identity.json) this
     # run resumes from.
+    #
+    # Token scoping (documented separately from hosted-e2e below):
+    # - `github.token` (job-level `actions: read`, otherwise default `contents: read`): used only
+    #   to download this *same* repository's own prior-run evidence artifact via `gh run
+    #   download`. It cannot reach the external target fixture repository at all.
+    # - `secrets.SQUAD_GH_AW_E2E_TOKEN`: the only credential able to read the external target
+    #   repository's pull requests/reviews/issues/branches. No separate read-only PAT exists for
+    #   that repository, so this job necessarily reuses the same secret `hosted-e2e` uses for
+    #   writes elsewhere -- but `resumeFallback()` and everything it transitively calls
+    #   (`bootstrapOutputs`, `selectManualFallbackCastPr`, `waitForManualFallbackCastPr`,
+    #   `waitForBaseControlledReviewCanary`) issue only `gh api` GET calls against that target, a
+    #   code-level invariant proved by a dedicated transitive-call-graph test in
+    #   test/gh-aw-hosted-e2e.test.ts (`transitively proves every function resumeFallback can
+    #   reach issues read-only GitHub API calls`). The credential's authority is broader than this
+    #   job exercises; it never performs a `pr create`/`pr merge`/`pr review`/write `--method`
+    #   call.
     if: >-
       github.repository == 'bradygaster/squad'
       && github.ref_name == github.event.repository.default_branch
