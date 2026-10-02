@@ -1540,6 +1540,44 @@ describe('gh-aw: squad-bootstrap pull-request fallback pure helpers (unit + muta
     )).toThrow();
   });
 
+  it('matches on repository/baseBranch/headSha alone when baseSha is omitted (review-path base-drift recovery)', () => {
+    // squad-review-guard.mjs's human-review lookup deliberately omits `baseSha` because a human
+    // may open the Cast PR well after the default branch has legitimately advanced past the
+    // commit the fallback issue's provenance recorded. Unlike the push-triggered rerun dedupe
+    // (which always supplies a live baseSha and must treat a stale record as "no match"), the
+    // review-path lookup must still find this exact issue regardless of how far the base has
+    // since moved on; base_sha ancestry is validated separately by the caller.
+    const marker = bootstrapPrFallbackIssueMarker(BOOTSTRAP_BRANCH);
+    const originalBaseSha = 'c'.repeat(40);
+    const compareUrl = buildBootstrapPrFallbackCompareUrl({
+      repository: 'octo/example', baseBranch: 'main', headBranch: BOOTSTRAP_BRANCH,
+      title: BOOTSTRAP_PR_TITLE, server: 'https://github.com',
+    });
+    const provenanceLine = buildBootstrapPrFallbackProvenanceLine({
+      repository: 'octo/example', runId: '123', baseBranch: 'main', baseSha: originalBaseSha,
+      headBranch: BOOTSTRAP_BRANCH, headSha: 'b'.repeat(40), compareUrl,
+    });
+    const issue = {
+      state: 'open',
+      user: { login: 'github-actions[bot]', type: 'Bot' },
+      title: BOOTSTRAP_PR_FALLBACK_ISSUE_TITLE,
+      body: `${marker}\n${provenanceLine}\n${compareUrl}`,
+      created_at: '2026-01-01T00:00:00Z',
+      updated_at: '2026-01-01T00:00:00Z',
+    };
+    const expectedProvenanceWithoutBaseSha = {
+      repository: 'octo/example', baseBranch: 'main', headSha: 'b'.repeat(40),
+    };
+    // Found even though the (omitted) base has since drifted far past `originalBaseSha`.
+    expect(findExistingBootstrapPrFallbackIssue(
+      [issue], BOOTSTRAP_BRANCH, expectedProvenanceWithoutBaseSha,
+    )).toBe(issue);
+    // Still rejects a wrong repository/baseBranch/headSha even without a baseSha constraint.
+    expect(findExistingBootstrapPrFallbackIssue(
+      [issue], BOOTSTRAP_BRANCH, { ...expectedProvenanceWithoutBaseSha, headSha: 'f'.repeat(40) },
+    )).toBeNull();
+  });
+
 
   it('binds the fallback issue body to the exact compare URL and branch marker', () => {
     const compareUrl = 'https://github.com/octo/example/compare/main...squad%2Fbootstrap-cast?expand=1';

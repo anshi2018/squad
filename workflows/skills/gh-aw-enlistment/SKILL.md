@@ -153,9 +153,11 @@ least privilege and never relies on `GITHUB_TOKEN` to self-approve.
 With it `false`, the bootstrap job's own `github.rest.pulls.create` call will
 fail with that exact error. Squad's bootstrap workflow catches only that
 specific error and falls back automatically: it still pushes the
-`chore/squad-gh-aw-bootstrap` branch, then opens (or, on a rerun, reuses) a
-tracking issue containing a ready-to-click GitHub compare URL
-(`.../compare/<base>...chore/squad-gh-aw-bootstrap?expand=1&title=...`) so a
+`squad/bootstrap-cast` branch (the Cast PR's own branch — distinct from the
+`chore/squad-gh-aw-bootstrap` branch you create by hand in step 2 below),
+then opens (or, on a rerun, reuses) a tracking issue containing a
+ready-to-click GitHub compare URL
+(`.../compare/<base>...squad/bootstrap-cast?expand=1&title=...`) so a
 human can open the PR manually in one click. Any other pull-request creation
 error (for example, a PR that already exists) still fails the job normally —
 only this one documented, exact permission error is treated as expected.

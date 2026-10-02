@@ -1172,6 +1172,21 @@ describe('Squad gh-aw hosted E2E manual pull request fallback outcome', () => {
     expect(hostedBody).toMatch(/installed Squad.*\n.*Review workflow then validates it locally/);
     expect(hostedBody).toContain('never a CI job, never a repository secret');
   });
+
+  it('writes a next_step instruction with a complete, directly-runnable resume-fallback invocation (all three required flags)', () => {
+    const hostedStart = SCRIPT.indexOf('function hosted(');
+    const hostedEnd = SCRIPT.indexOf('\nfunction ', hostedStart + 1);
+    const hostedBody = SCRIPT.slice(hostedStart, hostedEnd);
+    // Reproduces the exact arg names resumeFallback() requires via requireArg(),
+    // so a reviewer following next_step verbatim never hits "missing required
+    // argument" for --target, --evidence-in, or --evidence.
+    expect(hostedBody).toMatch(/resume-fallback[\s\S]*--target\b/);
+    expect(hostedBody).toMatch(/--evidence-in\b/);
+    expect(hostedBody).toMatch(/--evidence\b(?!-in)/);
+    // The gh run download step must precede resume-fallback and name the exact
+    // artifact convention resumeFallback's own doc comment documents.
+    expect(hostedBody).toMatch(/gh run download[\s\S]*?--repo[\s\S]*?--name squad-gh-aw-hosted-e2e-/);
+  });
 });
 
 

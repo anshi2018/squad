@@ -188,11 +188,17 @@ async function validateBootstrapPrFallbackAttribution(env, get, repository, pr, 
   // the linked research-proposals issue.
   requireThat(pr.title === BOOTSTRAP_TITLE,
     'pull request does not match the documented manual Cast fallback shape');
+  // Deliberately omits `baseSha` here (unlike squad-bootstrap.md's own push-triggered dedupe
+  // call): a human may open this Cast PR well after the default branch has legitimately
+  // advanced, and once the PR exists `classifyBootstrapState` never files a replacement
+  // fallback issue bound to a fresher base commit. Requiring a live `baseSha` match would make
+  // the human fallback path permanently unrecoverable the moment any further commit lands on
+  // the default branch. The recorded (immutable) `base_sha` is instead validated for live
+  // ancestry below, and the base-controlled run binding is pinned to that same immutable value.
   const issues = await list(get, `repos/${repository}/issues`);
   const fallbackIssue = findExistingBootstrapPrFallbackIssue(issues, BOOTSTRAP_BRANCH, {
     repository,
     baseBranch: pr.base.ref,
-    baseSha: pr.base.sha,
     headSha: pr.head.sha,
   });
   requireThat(fallbackIssue, 'missing base-controlled bootstrap PR fallback issue');
@@ -211,10 +217,32 @@ async function validateBootstrapPrFallbackAttribution(env, get, repository, pr, 
   requireThat(
     provenance.repository === repository &&
     provenance.base_branch === pr.base.ref &&
-    provenance.base_sha === pr.base.sha &&
     provenance.head_branch === pr.head.ref &&
     provenance.head_sha === pr.head.sha,
     'bootstrap PR fallback provenance does not match this pull request',
+  );
+  // `provenance.base_sha` pins the exact base commit the base-controlled bootstrap run that
+  // filed this fallback issue actually observed. It deliberately is NOT required to equal the
+  // live `pr.base.sha`: GitHub reports a PR's `base.sha` as the base ref's *current* tip, which
+  // advances with every ordinary commit landing on the default branch -- and a human may not open
+  // this Cast PR until well after that has happened. Once the PR exists, `classifyBootstrapState`
+  // never files a replacement fallback issue, so requiring live equality here would make the
+  // fallback path permanently unrecoverable after the first subsequent push. Instead, only prove
+  // `provenance.base_sha` is still a valid ancestor of (or identical to) the live base tip -- i.e.
+  // the default branch has only fast-forwarded since, never been rewound or force-pushed to an
+  // incompatible history.
+  // github.rest.repos.compareCommitsWithBasehead throws on API error (404/403 rate-limit/etc.),
+  // which propagates and fails this job closed -- there is no local/offline fallback. Beyond the
+  // status check, also bind the compare response's own resolved `base_commit`/`merge_base_commit`
+  // SHAs back to `provenance.base_sha`: a `status` of 'identical'/'ahead' alone does not guarantee
+  // the API resolved *this* base against *this* provenance commit (e.g. a short-SHA or mistyped
+  // route could silently compare against the wrong ref while still reporting a plausible status).
+  const baseComparison = await get(`repos/${repository}/compare/${provenance.base_sha}...${pr.base.sha}`);
+  requireThat(
+    (baseComparison?.status === 'identical' || baseComparison?.status === 'ahead') &&
+    baseComparison?.base_commit?.sha === provenance.base_sha &&
+    baseComparison?.merge_base_commit?.sha === provenance.base_sha,
+    'bootstrap PR fallback provenance base commit is not an ancestor of the pull request base',
   );
   const expectedCompareUrl = buildBootstrapPrFallbackCompareUrl({
     repository,
@@ -227,16 +255,17 @@ async function validateBootstrapPrFallbackAttribution(env, get, repository, pr, 
     'bootstrap PR fallback provenance compare URL does not match the expected manual link');
   requireThat(timestamp(fallbackIssue.created_at) <= timestamp(pr.created_at),
     'bootstrap PR fallback issue was created after this pull request');
-  // Mirrors validateBootstrapAttribution's run.head_sha === pr.base.sha check below: without
-  // it, a fallback issue's provenance.run_id only has to name *some* historical successful
-  // bootstrap run on the same base branch, not the run that actually produced the exact base
-  // commit this PR is targeting. Binding run.head_sha to pr.base.sha closes that gap.
+  // Mirrors validateBootstrapAttribution's run.head_sha === pr.base.sha check below, but binds to
+  // the immutable `provenance.base_sha` rather than the live, drifting `pr.base.sha` (see the
+  // ancestry check above for why): without this, a fallback issue's provenance.run_id only has to
+  // name *some* historical successful bootstrap run on the same base branch, not the run that
+  // actually produced the exact base commit recorded in this provenance.
   const run = await get(`repos/${repository}/actions/runs/${provenance.run_id}`);
   requireThat(
     run.event === 'push' &&
     run.path === BOOTSTRAP_WORKFLOW &&
     run.repository?.full_name === repository &&
-    run.head_sha === pr.base.sha &&
+    run.head_sha === provenance.base_sha &&
     run.head_branch === provenance.base_branch &&
     (!requireRunSuccess || (run.status === 'completed' && run.conclusion === 'success')),
     requireRunSuccess

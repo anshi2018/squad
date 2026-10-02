@@ -107,6 +107,12 @@ function fixture(relay = false) {
     attemptJobs: new Map([[1, jobs]]),
     repoIssues: [] as Record<string, unknown>[],
     extraRuns: new Map<string, Record<string, unknown>>(),
+    compareStatus: 'diverged' as 'identical' | 'ahead' | 'behind' | 'diverged',
+    compareThrows: 0 as number,
+    compareOmitBaseCommit: false,
+    compareOmitMergeBaseCommit: false,
+    compareBaseCommitShaOverride: undefined as string | undefined,
+    compareMergeBaseShaOverride: undefined as string | undefined,
   };
   const encode = (value: unknown) => {
     const content = Buffer.from(JSON.stringify(value));
@@ -126,6 +132,19 @@ function fixture(relay = false) {
       return { full_name: REPOSITORY, default_branch: 'dev' };
     }
     if (route === `repos/${REPOSITORY}/issues`) return state.repoIssues;
+    const compare = route.match(/\/compare\/([0-9a-f]{40})\.\.\.([0-9a-f]{40})$/);
+    if (compare) {
+      const [, baseSha, headSha] = compare;
+      if (state.compareThrows) throw Object.assign(new Error('API error'), { status: state.compareThrows });
+      const status = baseSha === headSha ? 'identical' : state.compareStatus;
+      const resolvedBaseSha = state.compareBaseCommitShaOverride ?? baseSha;
+      const result: Record<string, unknown> = { status };
+      if (!state.compareOmitBaseCommit) result.base_commit = { sha: resolvedBaseSha };
+      if (!state.compareOmitMergeBaseCommit) {
+        result.merge_base_commit = { sha: state.compareMergeBaseShaOverride ?? resolvedBaseSha };
+      }
+      return result;
+    }
     if (route.endsWith('/contents/.squad-review.json')) {
       expect(fields?.ref).toBe(HEAD);
       if (state.missingManifest) {
@@ -535,6 +554,101 @@ describe('independent Squad review guard', () => {
     makeBootstrapPrFallback(f);
     mutate(f);
     await expect(reviewTarget(f.env, f.get)).rejects.toThrow();
+  });
+
+  it('recovers the manual fallback trust path when the default branch fast-forwarded past the recorded base commit (base-drift regression)', async () => {
+    const f = fixture();
+    makeBootstrapPrFallback(f);
+    // Simulate ordinary activity landing on the default branch between the base-controlled
+    // bootstrap run filing the fallback issue and a human later opening the Cast PR: the live
+    // PR base.sha has moved on from the pinned provenance.base_sha, but the bootstrap run itself
+    // (id 29) still legitimately recorded the original BASE commit.
+    f.pr.base.sha = 'd'.repeat(40);
+    f.env.SQUAD_REVIEW_WORKFLOW_SHA = f.pr.base.sha;
+    f.state.compareStatus = 'ahead';
+    await expect(reviewTarget(f.env, f.get)).resolves.toMatchObject({
+      author_agent: '@squad/base-controlled-bootstrap',
+    });
+  });
+
+  it('refuses the manual fallback trust path when the default branch has diverged (force-pushed) past the recorded base commit', async () => {
+    const f = fixture();
+    makeBootstrapPrFallback(f);
+    f.pr.base.sha = 'd'.repeat(40);
+    f.env.SQUAD_REVIEW_WORKFLOW_SHA = f.pr.base.sha;
+    f.state.compareStatus = 'diverged';
+    await expect(reviewTarget(f.env, f.get)).rejects.toThrow(
+      'bootstrap PR fallback provenance base commit is not an ancestor of the pull request base',
+    );
+  });
+
+  it('refuses the manual fallback trust path when the default branch moved behind the recorded base commit', async () => {
+    const f = fixture();
+    makeBootstrapPrFallback(f);
+    f.pr.base.sha = 'd'.repeat(40);
+    f.env.SQUAD_REVIEW_WORKFLOW_SHA = f.pr.base.sha;
+    f.state.compareStatus = 'behind';
+    await expect(reviewTarget(f.env, f.get)).rejects.toThrow(
+      'bootstrap PR fallback provenance base commit is not an ancestor of the pull request base',
+    );
+  });
+
+  it('refuses the manual fallback trust path when the compare API errors (fails closed, no local ancestry assumption)', async () => {
+    const f = fixture();
+    makeBootstrapPrFallback(f);
+    f.pr.base.sha = 'd'.repeat(40);
+    f.env.SQUAD_REVIEW_WORKFLOW_SHA = f.pr.base.sha;
+    f.state.compareStatus = 'ahead';
+    f.state.compareThrows = 404;
+    await expect(reviewTarget(f.env, f.get)).rejects.toThrow('API error');
+  });
+
+  it('refuses the manual fallback trust path when the compare API omits base_commit (status alone is not binding proof)', async () => {
+    const f = fixture();
+    makeBootstrapPrFallback(f);
+    f.pr.base.sha = 'd'.repeat(40);
+    f.env.SQUAD_REVIEW_WORKFLOW_SHA = f.pr.base.sha;
+    f.state.compareStatus = 'ahead';
+    f.state.compareOmitBaseCommit = true;
+    await expect(reviewTarget(f.env, f.get)).rejects.toThrow(
+      'bootstrap PR fallback provenance base commit is not an ancestor of the pull request base',
+    );
+  });
+
+  it('refuses the manual fallback trust path when the compare API omits merge_base_commit', async () => {
+    const f = fixture();
+    makeBootstrapPrFallback(f);
+    f.pr.base.sha = 'd'.repeat(40);
+    f.env.SQUAD_REVIEW_WORKFLOW_SHA = f.pr.base.sha;
+    f.state.compareStatus = 'ahead';
+    f.state.compareOmitMergeBaseCommit = true;
+    await expect(reviewTarget(f.env, f.get)).rejects.toThrow(
+      'bootstrap PR fallback provenance base commit is not an ancestor of the pull request base',
+    );
+  });
+
+  it('refuses the manual fallback trust path when base_commit resolves to an unrelated commit despite a passing status', async () => {
+    const f = fixture();
+    makeBootstrapPrFallback(f);
+    f.pr.base.sha = 'd'.repeat(40);
+    f.env.SQUAD_REVIEW_WORKFLOW_SHA = f.pr.base.sha;
+    f.state.compareStatus = 'ahead';
+    f.state.compareBaseCommitShaOverride = 'e'.repeat(40);
+    await expect(reviewTarget(f.env, f.get)).rejects.toThrow(
+      'bootstrap PR fallback provenance base commit is not an ancestor of the pull request base',
+    );
+  });
+
+  it('refuses the manual fallback trust path when merge_base_commit resolves to an unrelated commit despite a passing status', async () => {
+    const f = fixture();
+    makeBootstrapPrFallback(f);
+    f.pr.base.sha = 'd'.repeat(40);
+    f.env.SQUAD_REVIEW_WORKFLOW_SHA = f.pr.base.sha;
+    f.state.compareStatus = 'ahead';
+    f.state.compareMergeBaseShaOverride = 'f'.repeat(40);
+    await expect(reviewTarget(f.env, f.get)).rejects.toThrow(
+      'bootstrap PR fallback provenance base commit is not an ancestor of the pull request base',
+    );
   });
 
   it('does not rescue malformed attribution or non-404 reads', async () => {

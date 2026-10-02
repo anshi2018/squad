@@ -387,29 +387,42 @@ export function buildBootstrapPrFallbackCompareUrl({ repository, baseBranch, hea
 // record closes both paths; only a genuinely duplicated legitimate fallback issue
 // (e.g. from a race between two runs) can still trigger the ambiguity error below.
 //
-// `expectedProvenance` (repository, baseBranch, baseSha, headSha) additionally rejects
-// a structurally valid match whose *recorded* provenance has gone stale relative to the
-// caller's current state — most importantly `baseSha`: the Cast branch is reused
-// unchanged across reruns (so a record's `head_sha` never reflects base drift), and
-// `base_branch` names the same default branch every time, so neither alone proves a
-// record still describes the live default-branch commit. Without this, once the default
-// branch advances past the commit an open fallback issue was bound to, this dedupe would
-// keep matching that now-permanently-rejectable issue (validateBootstrapPrFallbackAttribution
-// requires `run.head_sha === pr.base.sha`, which can never hold again for the stale
-// record), so the caller would keep skipping replacement and manual recovery could never
-// complete. Filtering staleness out here lets the caller fall through to opening a fresh,
-// currently valid fallback issue instead.
+// `expectedProvenance` (repository, baseBranch, headSha, and optionally baseSha) additionally
+// rejects a structurally valid match whose *recorded* provenance has gone stale relative to the
+// caller's current state.
+//
+// `baseSha` is OPTIONAL and serves two different callers with two different needs:
+//   - The push-triggered bootstrap rerun (`squad-bootstrap.md`) always supplies its own current
+//     `baseSha` (the exact commit that triggered it). The Cast branch is reused unchanged across
+//     reruns, so a record's `head_sha` never reflects base drift, and `base_branch` names the same
+//     default branch every time; neither alone proves a record still describes the live
+//     default-branch commit. Requiring an exact `baseSha` match here means once the default branch
+//     advances past the commit an open fallback issue was bound to, this dedupe stops matching the
+//     now-stale record, so this caller falls through to opening a fresh, currently valid one.
+//   - The human-review path (`squad-review-guard.mjs`'s `validateBootstrapPrFallbackAttribution`)
+//     looks up the fallback issue for a Cast PR that a human may open well after the default branch
+//     has legitimately advanced (ordinary pushes landing on an active default branch). That caller
+//     omits `baseSha` and matches on `repository` + `baseBranch` + `headSha` alone — because once a
+//     Cast PR already exists for the branch, `squad-bootstrap.md`'s own `classifyBootstrapState`
+//     treats that as already handled and never files a replacement fallback issue, so requiring a
+//     *live* `baseSha` match here would make the human fallback path permanently unrecoverable the
+//     moment any further commit lands on the default branch. That caller instead separately proves
+//     the recorded (immutable) `base_sha` is still a valid ancestor of the PR's live base via its
+//     own ancestry check, and binds the base-controlled run via `run.head_sha === provenance.base_sha`
+//     (the pinned value) rather than the live, drifting `pr.base.sha`.
 export function findExistingBootstrapPrFallbackIssue(issues, headBranch, expectedProvenance) {
   if (!Array.isArray(issues)) {
     throw new Error('Bootstrap PR fallback dedupe requires an issues array.');
   }
+  const hasBaseSha = expectedProvenance?.baseSha !== undefined;
   if (
     typeof expectedProvenance?.repository !== 'string' || expectedProvenance.repository.length === 0 ||
     typeof expectedProvenance?.baseBranch !== 'string' || expectedProvenance.baseBranch.length === 0 ||
-    !/^[0-9a-f]{40}$/.test(String(expectedProvenance?.baseSha ?? '')) ||
+    (hasBaseSha && !/^[0-9a-f]{40}$/.test(String(expectedProvenance.baseSha))) ||
     !/^[0-9a-f]{40}$/.test(String(expectedProvenance?.headSha ?? ''))
   ) {
-    throw new Error('Bootstrap PR fallback dedupe requires expected repository, baseBranch, baseSha, and headSha.');
+    throw new Error('Bootstrap PR fallback dedupe requires expected repository, baseBranch, and headSha '
+      + '(baseSha, if provided, must be a valid SHA).');
   }
   const marker = bootstrapPrFallbackIssueMarker(headBranch);
   const matches = issues.filter((issue) => {
@@ -434,7 +447,7 @@ export function findExistingBootstrapPrFallbackIssue(issues, headBranch, expecte
       provenance !== null &&
       provenance.repository === expectedProvenance.repository &&
       provenance.base_branch === expectedProvenance.baseBranch &&
-      provenance.base_sha === expectedProvenance.baseSha &&
+      (!hasBaseSha || provenance.base_sha === expectedProvenance.baseSha) &&
       provenance.head_sha === expectedProvenance.headSha
     );
   });

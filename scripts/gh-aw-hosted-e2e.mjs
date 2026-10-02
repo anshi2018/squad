@@ -1118,10 +1118,13 @@ function hosted(args, repositoryRoot) {
               'A human must open the Cast pull request at compare_url, matching this exact '
               + 'branch/head/base/SHA provenance. The target repository\'s own installed Squad '
               + 'Review workflow then validates it locally using that repository\'s own '
-              + 'GITHUB_TOKEN/gh-aw authority. To check on the outcome afterward, download this '
-              + 'run\'s evidence artifact and run '
-              + '`node scripts/gh-aw-hosted-e2e.mjs resume-fallback` locally, authenticated as '
-              + 'yourself (operator-driven; never a CI job, never a repository secret).',
+              + 'GITHUB_TOKEN/gh-aw authority. To check on the outcome afterward: (1) download '
+              + 'this run\'s evidence artifact, e.g. `gh run download <this-run-id> --repo '
+              + `${TRUSTED_SOURCE.repository} --name squad-gh-aw-hosted-e2e-<this-run-id> --dir `
+              + '<evidence-in-dir>`; (2) run `node scripts/gh-aw-hosted-e2e.mjs resume-fallback '
+              + `--target ${targetState.target} --evidence-in <evidence-in-dir> --evidence `
+              + '<evidence-out-dir>` locally, authenticated as yourself (operator-driven; '
+              + 'never a CI job, never a repository secret).',
           };
         })();
     if (bootstrapSummary.status === 'awaiting_manual_pr') {

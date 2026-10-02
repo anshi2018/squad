@@ -348,6 +348,34 @@ describe('gh-aw-enlistment skill', () => {
       expect(content).toContain('gh repo view --json nameWithOwner');
       expect(content).toContain('gh repo view --json defaultBranchRef');
     });
+
+    it('names the bootstrap job\'s own PR-creation fallback branch as the real Cast branch, distinct from the human-run install branch', () => {
+      // Regression for a Copilot review finding: this paragraph explains what
+      // happens when the *automated* bootstrap workflow's own
+      // github.rest.pulls.create call is refused (can_approve_pull_request_reviews
+      // false). That fallback always pushes BOOTSTRAP_BRANCH
+      // (workflows/shared/squad-bootstrap-validator.mjs), never the branch a
+      // human creates by hand in step 2 below (chore/squad-gh-aw-bootstrap).
+      // Conflating the two makes the compare URL example wrong and leaves an
+      // operator looking at the wrong branch.
+      const validatorSource = readLF('workflows/shared/squad-bootstrap-validator.mjs');
+      const bootstrapBranchMatch = validatorSource.match(/^export const BOOTSTRAP_BRANCH = '([^']+)';$/m);
+      expect(bootstrapBranchMatch, 'BOOTSTRAP_BRANCH constant must exist').not.toBeNull();
+      const bootstrapBranch = bootstrapBranchMatch![1];
+      expect(bootstrapBranch).toBe('squad/bootstrap-cast');
+
+      const paragraphStart = content.indexOf("With it `false`, the bootstrap job's own");
+      const paragraphEnd = content.indexOf('\n\n', paragraphStart);
+      expect(paragraphStart, 'fallback-explanation paragraph must exist').toBeGreaterThan(-1);
+      const paragraph = content.slice(paragraphStart, paragraphEnd);
+
+      expect(paragraph).toContain(`\`${bootstrapBranch}\` branch`);
+      expect(paragraph).toContain(`.../compare/<base>...${bootstrapBranch}?expand=1&title=...`);
+      // Mutation guard: the paragraph must not (re-)claim the automated
+      // fallback pushes the human's own manual install branch.
+      expect(paragraph).not.toContain('pushes the\n`chore/squad-gh-aw-bootstrap` branch');
+      expect(paragraph).not.toMatch(/compare\/<base>\.\.\.chore\/squad-gh-aw-bootstrap/);
+    });
   });
 
   describe('gh-aw bootstrap documentation', () => {

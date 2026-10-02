@@ -68,9 +68,9 @@
       "source": "workflows/package/squad-bootstrap.md",
       "destination": ".github/workflows/squad-bootstrap.md",
       "lock": ".github/workflows/squad-bootstrap.lock.yml",
-      "source_sha256": "437db5d59ee2230be9b352eaf2796ca7eb849d29710b24f95b8b0c65f1a95ad1",
-      "lock_sha256": "26af67d8f44ea759aaa012d95a442ec04e148350fb5d16e4decb1ff592664b51",
-      "package_lock_sha256": "5b0b5ad2ef4b0b18b6a6250e9bf6fe1f705ee568050ff3a329a299afd071cc79"
+      "source_sha256": "f3c58ef7ca1f52c227caa3a31b27f3b01a66ab1713468810ba3f53127e70151a",
+      "lock_sha256": "08fcaf2260c43e1354a8a7a665626dd784b240134a746a6c6793690274d47c8f",
+      "package_lock_sha256": "bc1ec9621df972c7cedfdfd4febc6c3b86a881b3cc94f7060f12deb4ca0da567"
     },
     {
       "name": "squad-command-router",
@@ -89,7 +89,7 @@
       "package_destination": ".github/workflows/shared/squad-review-guard.mjs",
       "destination": ".github/workflows/shared/squad-review-guard.mjs",
       "ownership": "manifest",
-      "sha256": "3c561a218117453af5752b9206dfd867391445690d1403e50f0a3be0811217ba"
+      "sha256": "2e5e16cfca47e5c0b50744e0c3cf56c5bedebd878f7422d4ed29d090c5abae11"
     },
     {
       "path": "shared/squad-install-verifier.mjs",
@@ -121,7 +121,7 @@
       "package_destination": ".github/workflows/shared/squad-bootstrap-validator.mjs",
       "destination": ".github/workflows/shared/squad-bootstrap-validator.mjs",
       "ownership": "manifest",
-      "sha256": "6abfd2177b813c19edbc28424be710dd6dd10c9afd8663a6e0b0332d29063171"
+      "sha256": "459aff32c1ed65c33e6807bd59ae53dfcf8e9b10e57a478ac14f5fed1e44d537"
     },
     {
       "path": "shared/squad-improvement-gate.mjs",
@@ -225,7 +225,7 @@
       "name": "gh-aw-enlistment",
       "source": "workflows/skills/gh-aw-enlistment/SKILL.md",
       "destination": ".github/skills/gh-aw-enlistment/SKILL.md",
-      "sha256": "7a3609b999f27bdfc0f01d4dcafe9ac17ddda5873dfe3868a72d5b2017025f88"
+      "sha256": "23f7c8690280d2814d50f48e3515bc5f1df5cb0e81b49872afeb49cb05e4b93b"
     }
   ],
   "bootstrap": {
