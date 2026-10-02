@@ -177,7 +177,7 @@ function bootstrapRecord(body, label = 'bootstrap provenance') {
 // check (SHA pinning, default-branch targeting, workflow-source binding, etc.) is enforced unchanged by
 // the surrounding `reviewTarget`. This never relies on `pulls.create`/review-approval permissions.
 async function validateBootstrapPrFallbackAttribution(env, get, repository, pr, requireRunSuccess) {
-  requireThat(pr.head.ref === BOOTSTRAP_BRANCH && pr.user?.type !== 'Bot',
+  requireThat(pr.head.ref === BOOTSTRAP_BRANCH && pr.user?.type === 'User',
     'pull request does not match the documented manual Cast fallback shape');
   const issues = await list(get, `repos/${repository}/issues`);
   const fallbackIssue = findExistingBootstrapPrFallbackIssue(issues, BOOTSTRAP_BRANCH);
@@ -526,9 +526,14 @@ export async function assertClearingReview(env, get, options = {}) {
     // present). A malformed marker from an authorized admin still fails
     // closed below -- it is never silently skipped.
     const authorized = [];
+    const permissionCache = new Map();
     for (const comment of tagged) {
       if (comment.user?.type !== 'User' || !/^[\w-]+$/.test(comment.user?.login ?? '')) continue;
-      const permission = await get(`repos/${target.repository}/collaborators/${comment.user.login}/permission`);
+      const login = comment.user.login;
+      if (!permissionCache.has(login)) {
+        permissionCache.set(login, await get(`repos/${target.repository}/collaborators/${login}/permission`));
+      }
+      const permission = permissionCache.get(login);
       if (permission.permission !== 'admin') continue;
       authorized.push(comment);
     }

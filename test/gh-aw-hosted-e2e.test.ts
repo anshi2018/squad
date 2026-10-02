@@ -151,6 +151,7 @@ const currentFallbackIssue = {
     + '### Create the pull request manually\n\n'
     + `${fallbackCompareUrl}\n\n`,
   createdAt: '2026-09-24T20:01:06.000Z',
+  updatedAt: '2026-09-24T20:01:06.000Z',
   author: ACTIONS_BOT,
   state: 'open',
 };
@@ -662,6 +663,26 @@ describe('Squad gh-aw hosted E2E manual pull request fallback outcome', () => {
     const oldIssue = { ...currentFallbackIssue, number: 19, createdAt: '2026-09-24T19:59:00.000Z' };
     expect(selectBootstrapFallback(
       currentFallbackOutputs(oldIssue),
+      baseline,
+      installation,
+      bootstrapRun,
+    )).toBeNull();
+  });
+
+  it('does not accept a closed fallback issue (a human dismissal does not count as a current report)', () => {
+    const closedIssue = { ...currentFallbackIssue, state: 'closed' };
+    expect(selectBootstrapFallback(
+      currentFallbackOutputs(closedIssue),
+      baseline,
+      installation,
+      bootstrapRun,
+    )).toBeNull();
+  });
+
+  it('does not accept an edited fallback issue (mirrors production: an edited issue would always fail review, so E2E must not report success for it)', () => {
+    const editedIssue = { ...currentFallbackIssue, updatedAt: '2026-09-24T20:05:00.000Z' };
+    expect(selectBootstrapFallback(
+      currentFallbackOutputs(editedIssue),
       baseline,
       installation,
       bootstrapRun,

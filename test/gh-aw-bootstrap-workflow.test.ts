@@ -1203,6 +1203,8 @@ describe('gh-aw: squad-bootstrap pull-request-creation permission-denied fallbac
       user: overrides.user ?? { login: 'github-actions[bot]', type: 'Bot' },
       title: BOOTSTRAP_PR_FALLBACK_ISSUE_TITLE,
       body: overrides.body ?? `${bootstrapPrFallbackIssueMarker(BOOTSTRAP_BRANCH)}\n${provenanceLine}\n${compareUrl}`,
+      created_at: '2026-01-01T00:00:00Z',
+      updated_at: '2026-01-01T00:00:00Z',
     };
   }
 
@@ -1280,6 +1282,17 @@ describe('gh-aw: squad-bootstrap pull-request-creation permission-denied fallbac
         throw permissionDeniedError();
       },
       issues: [closedIssue],
+    });
+    expect(issuesCreateCalls).toHaveLength(1);
+  });
+
+  it('does not dedupe against an edited fallback issue (review always rejects an edited issue, so reusing it would stall recovery)', async () => {
+    const editedIssue = { ...validFallbackIssue(), updated_at: '2026-01-01T00:05:00Z' };
+    const { issuesCreateCalls } = await run({
+      pullsCreate: async () => {
+        throw permissionDeniedError();
+      },
+      issues: [editedIssue],
     });
     expect(issuesCreateCalls).toHaveLength(1);
   });
@@ -1437,6 +1450,8 @@ describe('gh-aw: squad-bootstrap pull-request fallback pure helpers (unit + muta
       title: BOOTSTRAP_PR_FALLBACK_ISSUE_TITLE,
       body: `${marker}\n${provenanceLine}\n${compareUrl}${bodySuffix}`,
       html_url: 'u1',
+      created_at: '2026-01-01T00:00:00Z',
+      updated_at: '2026-01-01T00:00:00Z',
     });
     const open = validIssue();
     expect(findExistingBootstrapPrFallbackIssue([], BOOTSTRAP_BRANCH)).toBeNull();
@@ -1454,6 +1469,15 @@ describe('gh-aw: squad-bootstrap pull-request fallback pure helpers (unit + muta
     expect(findExistingBootstrapPrFallbackIssue(
       [{ state: 'open', user: { login: 'github-actions[bot]', type: 'Bot' }, title: BOOTSTRAP_PR_FALLBACK_ISSUE_TITLE, body: `${marker}\nno provenance` }],
       BOOTSTRAP_BRANCH,
+    )).toBeNull();
+    // Recovery-stall proof: validateBootstrapPrFallbackAttribution always rejects an edited
+    // fallback issue, so an edited issue must never be treated as a dedupe match either -
+    // otherwise the bootstrap rerun would stall, forever reusing an issue review can't accept.
+    expect(findExistingBootstrapPrFallbackIssue(
+      [{ ...open, updated_at: '2026-01-01T00:05:00Z' }], BOOTSTRAP_BRANCH,
+    )).toBeNull();
+    expect(findExistingBootstrapPrFallbackIssue(
+      [{ ...open, created_at: undefined, updated_at: undefined }], BOOTSTRAP_BRANCH,
     )).toBeNull();
     expect(() =>
       findExistingBootstrapPrFallbackIssue([open, validIssue('\nother')], BOOTSTRAP_BRANCH),
@@ -1495,5 +1519,39 @@ describe('gh-aw: squad-bootstrap pull-request fallback pure helpers (unit + muta
         repository: 'octo/example', baseBranch: 'main', headBranch: BOOTSTRAP_BRANCH, compareUrl,
       }),
     ).toThrow(/signed provenance line/);
+  });
+
+  it('tells the human to manually re-run bootstrap to generate the research issue before merge', () => {
+    // No GitHub event automatically re-triggers squad-bootstrap the moment this fallback issue is
+    // opened: the next automatic run only fires on a push to squad-related paths on the default
+    // branch (i.e. at merge time). A human who wants the linked research-proposals issue to exist
+    // before merging the Cast PR must be told, in this bot-authored issue body, to manually
+    // re-dispatch the workflow while the PR is still open.
+    const compareUrl = 'https://github.com/octo/example/compare/main...squad%2Fbootstrap-cast?expand=1';
+    const provenanceLine = buildBootstrapPrFallbackProvenanceLine({
+      repository: 'octo/example',
+      runId: '123',
+      baseBranch: 'main',
+      headBranch: BOOTSTRAP_BRANCH,
+      headSha: 'a'.repeat(40),
+      compareUrl,
+    });
+    const body = buildBootstrapPrFallbackIssueBody({
+      repository: 'octo/example',
+      baseBranch: 'main',
+      headBranch: BOOTSTRAP_BRANCH,
+      compareUrl,
+      runUrl: 'https://github.com/octo/example/actions/runs/123',
+      provenanceLine,
+    });
+    expect(body).toContain('Generate the linked research-proposals issue');
+    expect(body).toContain('manually');
+    expect(body).toContain('Actions tab');
+    expect(body).toContain('Run workflow');
+    expect(body).toContain('still open');
+    expect(body.indexOf('Create the pull request manually'))
+      .toBeLessThan(body.indexOf('Generate the linked research-proposals issue'));
+    expect(body.indexOf('Generate the linked research-proposals issue'))
+      .toBeLessThan(body.indexOf('Restore automated pull request creation'));
   });
 });

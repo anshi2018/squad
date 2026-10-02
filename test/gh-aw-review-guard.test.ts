@@ -388,6 +388,16 @@ describe('independent Squad review guard', () => {
     );
   });
 
+  it('rejects a fallback-path PR authored by a non-human, non-Bot account type (regression: only an actual User account qualifies)', async () => {
+    const f = fixture();
+    makeBootstrapPrFallback(f);
+    f.pr.user = { login: 'some-app', type: 'Organization' };
+    f.sync();
+    await expect(reviewTarget(f.env, f.get)).rejects.toThrow(
+      'pull request does not match the documented manual Cast fallback shape',
+    );
+  });
+
   it('still refuses an ordinary (non-fallback) human-authored PR with the unchanged bootstrap provenance error', async () => {
     const f = fixture();
     f.state.missingManifest = true;
@@ -827,6 +837,23 @@ describe('independent Squad review guard', () => {
     const get = async (route: string, fields?: Record<string, unknown>) =>
       route.endsWith('/collaborators/attacker/permission') ? { permission: 'write' } : baseGet(route, fields);
     await expect(assertClearingReview(f.env, get, { relay: true })).rejects.toThrow();
+  });
+
+  it('caches collaborator permission lookups per login (regression: repeated override comments from the same admin must not repeat the API call)', async () => {
+    const f = fixture(true);
+    f.verdict.result = 'REQUEST_CHANGES';
+    // Same admin login as f.comment, but bound to a different head SHA so it is excluded
+    // from the override cardinality -- it should still be authorization-checked (same code
+    // path as f.comment), proving the cache is keyed by login rather than skipping work.
+    const sameLoginDecoy = {
+      user: { login: 'human', type: 'User' }, created_at: FINISHED, updated_at: FINISHED,
+      body: `${OVERRIDE_PREFIX}${JSON.stringify({ ...f.override, head_sha: BASE, reason: 'same admin login, non-matching head SHA' })}`,
+    };
+    f.state.comments = [f.comment, sameLoginDecoy];
+    f.sync();
+    await expect(assertClearingReview(f.env, f.get, { relay: true })).resolves.toEqual(f.verdict);
+    const permissionCalls = f.state.calls.filter(route => route.endsWith('/collaborators/human/permission'));
+    expect(permissionCalls).toHaveLength(1);
   });
 
   it('cannot override missing, stale, or self-authored evidence', async () => {

@@ -539,6 +539,27 @@ describe('improvement: one authorized dispatcher route and installed contract', 
       expect(result.reason).toBe('approval-relay-context-invalid');
     }
   });
+  it('accepts an engine-reported item identity that is a native number rather than a decimal string (regression: canonical safe-integer identity, not strict type-sensitive equality)', async () => {
+    const origin = {
+      repo: REPO, workflow_id: `${REPO}/.github/workflows/squad.lock.yml@refs/heads/dev`,
+      event_type: 'issue_comment', item_type: 'issue', item_number: 77, comment_id: 901,
+    };
+    const routedEnv = { ...env(), GITHUB_ACTOR: 'github-actions[bot]', SQUAD_IMPROVE_AW_CONTEXT: JSON.stringify(origin) };
+    expect((await gate.collectImprovementContext(routedEnv, api())).authorized).toBe(true);
+  });
+  it.each(['77.0', '077', '-77', '77e0', '9007199254740993', '', null, true])(
+    'rejects a malformed or overflowing engine-reported item_number %s even though it would loosely compare equal to 77',
+    async malformed => {
+      const origin = {
+        repo: REPO, workflow_id: `${REPO}/.github/workflows/squad.lock.yml@refs/heads/dev`,
+        event_type: 'issue_comment', item_type: 'issue', item_number: malformed, comment_id: '901',
+      };
+      const routedEnv = { ...env(), GITHUB_ACTOR: 'github-actions[bot]', SQUAD_IMPROVE_AW_CONTEXT: JSON.stringify(origin) };
+      const result = await gate.collectImprovementContext(routedEnv, api());
+      expect(result.authorized).toBe(false);
+      expect(result.reason).toBe('approval-relay-context-invalid');
+    },
+  );
   it('strict-compiles the am transport, exact allowlist and before-handler live gate', () => {
     const root = scratch();
     cpSync(resolve(ROOT, 'workflows'), join(root, '.github', 'workflows'), { recursive: true });
@@ -683,6 +704,22 @@ describe('improvement: second-hop relay context survives gh-aw engine aw_context
       expect(result.reason).toBe('approval-relay-context-invalid');
     }
   });
+  it('accepts a relay-forwarded item identity that is a native number rather than a decimal string', async () => {
+    const result = await gate.collectImprovementContext({
+      ...routedEnv, SQUAD_IMPROVE_RELAY_CONTEXT: JSON.stringify({ ...relayContext, item_number: 77, comment_id: 901 }),
+    }, api());
+    expect(result.authorized).toBe(true);
+  });
+  it.each(['77.0', '077', '-77', '77e0', '9007199254740993', ''])(
+    'rejects a malformed or overflowing relay-forwarded item_number %s even though it would loosely compare equal to 77',
+    async malformed => {
+      const result = await gate.collectImprovementContext({
+        ...routedEnv, SQUAD_IMPROVE_RELAY_CONTEXT: JSON.stringify({ ...relayContext, item_number: malformed }),
+      }, api());
+      expect(result.authorized).toBe(false);
+      expect(result.reason).toBe('approval-relay-context-invalid');
+    },
+  );
   it('does not regress the native direct-comment path (engine context alone remains authoritative there)', async () => {
     const nativeOrigin = {
       repo: REPO, workflow_id: `${REPO}/.github/workflows/squad.lock.yml@refs/heads/dev`,

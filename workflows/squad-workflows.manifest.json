@@ -68,9 +68,9 @@
       "source": "workflows/package/squad-bootstrap.md",
       "destination": ".github/workflows/squad-bootstrap.md",
       "lock": ".github/workflows/squad-bootstrap.lock.yml",
-      "source_sha256": "e89697117aa51d185d35940832a0e4ddba9f5aa00faabf8e7887a8347a885e21",
-      "lock_sha256": "d1bcf8d12bc6ff324c2b43c13cdb4216d4c0ec9bfbd8fdbf0e3ce0c7506990e0",
-      "package_lock_sha256": "87ac6c5304d5a1eb19784902605840dac126c430491a5feef2db07e762d28338"
+      "source_sha256": "be05f770830a20f5c3c0dd7dbda5f35dadf053f3146587503606c26c2dc0476e",
+      "lock_sha256": "3f83e7bb4e579deaa14a690d7ffb38020b88ef48ddc6f2eb53bd9dce474ae95d",
+      "package_lock_sha256": "100556a353f197f9727c0fcee74107818cc8d7118ca26552efc94c66f2600953"
     },
     {
       "name": "squad-command-router",
@@ -89,7 +89,7 @@
       "package_destination": ".github/workflows/shared/squad-review-guard.mjs",
       "destination": ".github/workflows/shared/squad-review-guard.mjs",
       "ownership": "manifest",
-      "sha256": "12f9ed1d391cadaf08eb2022ddb91150457856054970ba292a0c5f7f573c1c82"
+      "sha256": "129547083c794e12dbe127a3ed6e0b9304afc01889793536aa3ee4374f9ed924"
     },
     {
       "path": "shared/squad-install-verifier.mjs",
@@ -121,7 +121,7 @@
       "package_destination": ".github/workflows/shared/squad-bootstrap-validator.mjs",
       "destination": ".github/workflows/shared/squad-bootstrap-validator.mjs",
       "ownership": "manifest",
-      "sha256": "cdfdb8a719c8fdafba9b10aaab8d3fddc994a02d1538822b5fbe57ec717f6f06"
+      "sha256": "2aabf1a4d4b1ee1e503e85c10fa07c904fadb7adf2bcb199057e9f7aec30e86e"
     },
     {
       "path": "shared/squad-improvement-gate.mjs",
@@ -225,7 +225,7 @@
       "name": "gh-aw-enlistment",
       "source": "workflows/skills/gh-aw-enlistment/SKILL.md",
       "destination": ".github/skills/gh-aw-enlistment/SKILL.md",
-      "sha256": "abb21e970ecbb767f9a35fdd21383bbe79118fc7ab9194c9cba7dd47794d5c5a"
+      "sha256": "7a3609b999f27bdfc0f01d4dcafe9ac17ddda5873dfe3868a72d5b2017025f88"
     }
   ],
   "bootstrap": {

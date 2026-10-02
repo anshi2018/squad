@@ -356,18 +356,21 @@ export function buildBootstrapPrFallbackCompareUrl({ repository, baseBranch, hea
 
 // Idempotency guard: finds an already-open fallback issue bound to the exact head
 // branch so reruns cannot spam duplicate manual-PR-creation issues. A previously
-// closed fallback issue (human dismissal) does not suppress a fresh one.
+// closed fallback issue (human dismissal) does not suppress a fresh one, and nor
+// does an edited one: `validateBootstrapPrFallbackAttribution` always rejects an
+// edited fallback issue, so treating it as a dedupe match here would stall the
+// manual recovery path on an issue the review check can never accept.
 //
-// Candidates are filtered to canonical bot-authored, correctly titled, valid-provenance
-// issues *before* counting matches: the marker text is a plain HTML-comment substring
-// with no signature, so without this filter any repository participant able to open an
-// issue could post a forged marker to either silently suppress creation of the real
-// fallback issue (this function returning their forgery, causing the caller to skip
-// issue creation) or manufacture an ambiguity error once a legitimate fallback issue
-// also exists. Requiring bot authorship, the exact fallback title, and a structurally
-// valid provenance record closes both paths; only a genuinely duplicated legitimate
-// fallback issue (e.g. from a race between two runs) can still trigger the ambiguity
-// error below.
+// Candidates are filtered to canonical bot-authored, correctly titled, unedited,
+// valid-provenance issues *before* counting matches: the marker text is a plain
+// HTML-comment substring with no signature, so without this filter any repository
+// participant able to open an issue could post a forged marker to either silently
+// suppress creation of the real fallback issue (this function returning their
+// forgery, causing the caller to skip issue creation) or manufacture an ambiguity
+// error once a legitimate fallback issue also exists. Requiring bot authorship, the
+// exact fallback title, an unedited issue, and a structurally valid provenance
+// record closes both paths; only a genuinely duplicated legitimate fallback issue
+// (e.g. from a race between two runs) can still trigger the ambiguity error below.
 export function findExistingBootstrapPrFallbackIssue(issues, headBranch) {
   if (!Array.isArray(issues)) {
     throw new Error('Bootstrap PR fallback dedupe requires an issues array.');
@@ -378,6 +381,12 @@ export function findExistingBootstrapPrFallbackIssue(issues, headBranch) {
     issue?.user?.login === 'github-actions[bot]' &&
     issue?.user?.type === 'Bot' &&
     issue?.title === BOOTSTRAP_PR_FALLBACK_ISSUE_TITLE &&
+    // Mirrors validateBootstrapPrFallbackAttribution's unedited-issue requirement: an edited
+    // issue can never pass that review check, so treating it as a dedupe match here would
+    // make the caller skip creating a usable replacement and stall the manual recovery path.
+    typeof issue?.created_at === 'string' &&
+    issue.created_at.length > 0 &&
+    issue.updated_at === issue.created_at &&
     typeof issue?.body === 'string' &&
     issue.body.includes(marker) &&
     parseBootstrapPrFallbackProvenance(issue.body) !== null
@@ -414,6 +423,13 @@ export function buildBootstrapPrFallbackIssueBody({
     'requests.\n\n' +
     '### Create the pull request manually\n\n' +
     `${compareUrl}\n\n` +
+    '### Generate the linked research-proposals issue\n\n' +
+    'No GitHub event automatically re-runs Squad Bootstrap once this issue is open: the next automatic run ' +
+    'only fires on a push to squad-related paths on the default branch, which happens when the pull request ' +
+    'above is merged. If you want the linked research-proposals issue created **before** merging, manually ' +
+    're-run this workflow now (Actions tab → **Squad Bootstrap** → **Run workflow**) while the pull request is ' +
+    'still open; Squad Bootstrap detects the open pull request and creates the research issue without requiring ' +
+    'a merge first.\n\n' +
     '### Restore automated pull request creation (optional)\n\n' +
     '1. Go to **Settings** → **Actions** → **General**\n' +
     '2. Under **Workflow permissions**, check **Allow GitHub Actions to create and approve pull requests**\n' +

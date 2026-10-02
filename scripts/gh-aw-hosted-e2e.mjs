@@ -185,6 +185,7 @@ const githubAdapter = Object.freeze({
       title: issue.title,
       body: issue.body,
       createdAt: issue.created_at,
+      updatedAt: issue.updated_at,
       author: {
         login: issue.user.login,
         id: issue.user.id,
@@ -617,7 +618,10 @@ export function waitForBootstrapOutputs(
 // opens instead of a Cast PR whenever GITHUB_TOKEN pull request creation is denied (the only
 // reachable outcome once a target enforces the required `can_approve_pull_request_reviews=false`
 // Actions permission). No research issue is created on this path: bootstrap returns immediately
-// after opening the fallback issue, before the research-issue step ever runs.
+// after opening the fallback issue, before the research-issue step ever runs. The candidate filter
+// also mirrors production's lifecycle checks (open, unedited) from
+// validateBootstrapPrFallbackAttribution / findExistingBootstrapPrFallbackIssue: a closed or
+// edited issue always fails that review, so E2E must not treat it as a current, acceptable report.
 export function selectBootstrapFallback(outputs, baseline, installation, bootstrapRun) {
   const cutoff = Math.max(
     Date.parse(baseline.capturedAt),
@@ -628,6 +632,9 @@ export function selectBootstrapFallback(outputs, baseline, installation, bootstr
     issue.number > baseline.maximumIssueNumber
     && Date.parse(issue.createdAt) >= cutoff
     && issue.title === BOOTSTRAP_PR_FALLBACK_ISSUE_TITLE
+    && issue.state === 'open'
+    && typeof issue.createdAt === 'string' && issue.createdAt.length > 0
+    && issue.updatedAt === issue.createdAt
   ));
   if (fallbackIssues.length > 1) {
     throw new Error(`Ambiguous current bootstrap fallback issues: found ${fallbackIssues.length}.`);
