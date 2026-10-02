@@ -68,9 +68,9 @@
       "source": "workflows/package/squad-bootstrap.md",
       "destination": ".github/workflows/squad-bootstrap.md",
       "lock": ".github/workflows/squad-bootstrap.lock.yml",
-      "source_sha256": "f3c58ef7ca1f52c227caa3a31b27f3b01a66ab1713468810ba3f53127e70151a",
-      "lock_sha256": "08fcaf2260c43e1354a8a7a665626dd784b240134a746a6c6793690274d47c8f",
-      "package_lock_sha256": "bc1ec9621df972c7cedfdfd4febc6c3b86a881b3cc94f7060f12deb4ca0da567"
+      "source_sha256": "42b929f7befe6892b4f63d7531c5ee55c246a9ecbe4ec0db04041e424d07733e",
+      "lock_sha256": "dd3a391a655ed9a65ec06b2fb16a1d2cb327321631f618147b86a9bddc6c1db9",
+      "package_lock_sha256": "0037cae72c220cdd05c0d7452b11bccd15956cc1cac98a187666af583a3dd5ff"
     },
     {
       "name": "squad-command-router",
@@ -121,7 +121,7 @@
       "package_destination": ".github/workflows/shared/squad-bootstrap-validator.mjs",
       "destination": ".github/workflows/shared/squad-bootstrap-validator.mjs",
       "ownership": "manifest",
-      "sha256": "459aff32c1ed65c33e6807bd59ae53dfcf8e9b10e57a478ac14f5fed1e44d537"
+      "sha256": "1af6ab267eaf1148501a949b8b9ac65a1929130b03a1d7f757b156fd2de63fbb"
     },
     {
       "path": "shared/squad-improvement-gate.mjs",
@@ -225,7 +225,7 @@
       "name": "gh-aw-enlistment",
       "source": "workflows/skills/gh-aw-enlistment/SKILL.md",
       "destination": ".github/skills/gh-aw-enlistment/SKILL.md",
-      "sha256": "23f7c8690280d2814d50f48e3515bc5f1df5cb0e81b49872afeb49cb05e4b93b"
+      "sha256": "8a3f2d22a110d73f8a89e4f0645547354a35e185d3d2f49235265a4d017464f4"
     }
   ],
   "bootstrap": {

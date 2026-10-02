@@ -283,13 +283,18 @@ unchanged bootstrap-provenance error:
 - the fallback issue is open, bot-authored, carries the expected title and
   branch marker, and was never edited after creation (`updated_at ===
   created_at`);
-- exactly one such *bot-authored, correctly titled, valid-provenance,
-  currently-bound* open fallback issue exists for the branch — an issue
-  missing any of those qualifiers, or bound to a base commit the default
-  branch has since advanced past, is excluded before counting, so it can
-  neither suppress the real fallback issue nor manufacture ambiguity (and a
-  base-drifted record never permanently blocks recovery: a fresh fallback
-  issue is filed instead);
+- among every *bot-authored, correctly titled, valid-provenance* open issue
+  for the branch, the single most recently created one is selected — an issue
+  missing any of those qualifiers is excluded before this selection, so it can
+  neither suppress the real fallback issue nor be selected in its place. This
+  lookup intentionally tolerates more than one such issue coexisting: a prior
+  base-drifted record is never closed when a fresh one is filed (recovery
+  must never permanently stall), so an older, now-stale issue can remain open
+  alongside the current one. Selecting by recency cannot by itself admit a
+  record the next two checks would otherwise reject — those checks
+  independently re-verify the *selected* record's exact field match and its
+  base commit's live ancestry, so an attacker gains nothing from leaving a
+  genuine old issue open;
 - the issue's signed record parses and its `repository`, `base_branch`,
   `base_sha`, `head_branch`, and `head_sha` fields exactly match the live
   pull request, and its `compare_url` exactly matches the reconstructed

@@ -414,16 +414,16 @@ the workflow installation is merged and the post-merge Cast canary succeeds.
   manually-opened PR in that one narrowly-scoped case (see "Optional: PAT
   fallback" and the fallback-issue provenance contract in
   `docs/src/content/docs/guide/gh-aw.md` for the exact trust conditions).
-  On the fallback path, no automatic trigger re-runs `squad-bootstrap` the
-  moment the human opens that compare-URL PR — the next automatic run only
-  fires on a push to squad-related paths on the default branch, i.e. at merge
-  time — so the linked research-proposals issue does not exist yet. If the
-  user wants it before merging, the fallback issue itself tells them to
-  manually re-run the Squad Bootstrap workflow (`workflow_dispatch`) while the
-  PR is still open, which deterministically detects it and creates the
-  research issue without requiring a merge first; otherwise the research
-  issue is created automatically by the push-triggered run right after merge.
-  Either way, the user reviews and merges the Cast PR, then follows the
+  On the fallback path, no automatic trigger re-runs `squad-bootstrap` at any
+  point — **not** when the human opens that compare-URL PR, and **not** when
+  they later merge it either: `squad-bootstrap`'s push trigger only watches
+  the Squad workflow-source paths (for example `.github/workflows/squad*.md`),
+  and the manually-opened PR never touches any of those paths. The fallback
+  issue itself tells the user to manually re-run the Squad Bootstrap workflow
+  (`workflow_dispatch`) — either now, while the PR is still open, or anytime
+  after merging it — which deterministically detects the PR (open or merged)
+  and creates the linked research-proposals issue; no automatic trigger ever
+  does this for them. Either way, the user reviews and merges the Cast PR, then follows the
   research issue's `/squad research`, `/squad triage`, `/squad plan`, and
   `/squad activate` instructions until assignable implementation issues exist.
 

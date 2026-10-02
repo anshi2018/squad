@@ -950,6 +950,28 @@ describe('Squad gh-aw hosted E2E manual pull request fallback outcome', () => {
     );
   });
 
+  it('selectManualFallbackCastPr excludes a closed or merged pull request from candidates (regression)', () => {
+    // Regression test (Copilot review on bb805b2c, "Filter fallback selection to open pull
+    // requests"): listPullRequests queries state=all, so an unrelated closed/merged human PR that
+    // otherwise matches every other field (head/base branch, title, author, SHAs, timing) must
+    // never be treated as the manual fallback Cast PR - open state is load-bearing, not cosmetic.
+    const closedPr = manualCastPr({ state: 'closed' });
+    expect(selectManualFallbackCastPr(manualFallbackOutputs(closedPr), currentFallbackIssue)).toBeNull();
+    const mergedPr = manualCastPr({ state: 'merged' });
+    expect(selectManualFallbackCastPr(manualFallbackOutputs(mergedPr), currentFallbackIssue)).toBeNull();
+    // A genuinely open, otherwise-identical PR must still be found (not an over-broad fix that
+    // breaks the valid path).
+    const openPr = manualCastPr();
+    expect(selectManualFallbackCastPr(manualFallbackOutputs(openPr), currentFallbackIssue)).toBe(openPr);
+    // Mixing a closed look-alike with the real open candidate must resolve to the open one alone,
+    // not throw ambiguity merely because a closed decoy also matches every other field.
+    const mixedOutputs = {
+      ...manualFallbackOutputs(),
+      castPrs: [closedPr, openPr],
+    };
+    expect(selectManualFallbackCastPr(mixedOutputs, currentFallbackIssue)).toBe(openPr);
+  });
+
   it('selectManualFallbackCastPr fails closed on a pull request opened before the fallback issue', () => {
     const pr = manualCastPr({ createdAt: '2026-09-24T20:00:00.000Z' });
     expect(selectManualFallbackCastPr(manualFallbackOutputs(pr), currentFallbackIssue)).toBeNull();

@@ -410,6 +410,18 @@ export function buildBootstrapPrFallbackCompareUrl({ repository, baseBranch, hea
 //     the recorded (immutable) `base_sha` is still a valid ancestor of the PR's live base via its
 //     own ancestry check, and binds the base-controlled run via `run.head_sha === provenance.base_sha`
 //     (the pinned value) rather than the live, drifting `pr.base.sha`.
+//
+// Omitting `baseSha` intentionally admits more than one open match *only when they disagree on
+// `base_sha`*: a prior push-triggered rerun may have left an older, now-stale fallback issue open
+// (bound to a since-superseded `base_sha`) when a later rerun's strict `baseSha` match failed to
+// dedupe against it and filed a fresh one. The caller that omits `baseSha` (the review path)
+// deterministically resolves that specific shape by selecting the single most recently created
+// matching issue rather than treating it as an error — `validateBootstrapPrFallbackAttribution`
+// independently re-proves the selected record's `base_sha` is still a live ancestor, so selecting
+// the newest record cannot admit a record that check would otherwise reject, and an attacker
+// cannot gain anything by leaving old genuine fallback issues open. Multiple matches that all
+// share the *same* recorded `base_sha` are never explained by that base-drift succession, so they
+// remain a genuine, unresolvable ambiguity regardless of whether the caller supplied `baseSha`.
 export function findExistingBootstrapPrFallbackIssue(issues, headBranch, expectedProvenance) {
   if (!Array.isArray(issues)) {
     throw new Error('Bootstrap PR fallback dedupe requires an issues array.');
@@ -452,7 +464,25 @@ export function findExistingBootstrapPrFallbackIssue(issues, headBranch, expecte
     );
   });
   if (matches.length > 1) {
-    throw new Error('Ambiguous bootstrap PR fallback issues: found multiple open matches for the same branch.');
+    // Multiple matches recorded at the exact same `base_sha` are never explained by the
+    // base-drift succession this tolerance exists for (that scenario always produces *different*
+    // recorded `base_sha` values between the stale and fresh issue) - it's a genuine,
+    // unresolvable duplicate (for example a racing concurrent rerun) and must still fail closed
+    // regardless of whether the caller supplied `baseSha`.
+    const distinctBaseShas = new Set(matches.map((candidate) => {
+      const provenance = parseBootstrapPrFallbackProvenance(candidate.body);
+      return provenance.base_sha;
+    }));
+    if (hasBaseSha || distinctBaseShas.size === 1) {
+      throw new Error('Ambiguous bootstrap PR fallback issues: found multiple open matches for the same branch.');
+    }
+    // See the "Omitting `baseSha`" note above: deterministically resolve to the newest record
+    // rather than erroring, since a strict-baseSha caller may have legitimately left an older,
+    // now-stale match open (bound to a different, since-superseded `base_sha`) instead of closing
+    // it when base drift triggered a fresh issue.
+    return matches.reduce((newest, candidate) => (
+      Date.parse(candidate.created_at) > Date.parse(newest.created_at) ? candidate : newest
+    ));
   }
   return matches[0] ?? null;
 }
@@ -484,12 +514,13 @@ export function buildBootstrapPrFallbackIssueBody({
     '### Create the pull request manually\n\n' +
     `${compareUrl}\n\n` +
     '### Generate the linked research-proposals issue\n\n' +
-    'No GitHub event automatically re-runs Squad Bootstrap once this issue is open: the next automatic run ' +
-    'only fires on a push to squad-related paths on the default branch, which happens when the pull request ' +
-    'above is merged. If you want the linked research-proposals issue created **before** merging, manually ' +
-    're-run this workflow now (Actions tab → **Squad Bootstrap** → **Run workflow**) while the pull request is ' +
-    'still open; Squad Bootstrap detects the open pull request and creates the research issue without requiring ' +
-    'a merge first.\n\n' +
+    'No GitHub event automatically re-runs Squad Bootstrap once this issue is open, **including merging the ' +
+    'pull request above**: Squad Bootstrap only re-triggers on a push to the Squad workflow-source paths ' +
+    '(for example `.github/workflows/squad*.md`), and the pull request above does not touch any of those ' +
+    'paths. Manually re-run this workflow (Actions tab → **Squad Bootstrap** → **Run workflow**) either now, ' +
+    'while the pull request is still open, or anytime after merging it; Squad Bootstrap detects the pull ' +
+    'request (open or merged) and creates the linked research issue — no automatic trigger will do this for ' +
+    'you.\n\n' +
     '### Restore automated pull request creation (optional)\n\n' +
     '1. Go to **Settings** → **Actions** → **General**\n' +
     '2. Under **Workflow permissions**, check **Allow GitHub Actions to create and approve pull requests**\n' +

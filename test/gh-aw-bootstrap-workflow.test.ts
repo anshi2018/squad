@@ -1578,6 +1578,60 @@ describe('gh-aw: squad-bootstrap pull-request fallback pure helpers (unit + muta
     )).toBeNull();
   });
 
+  it('resolves multiple genuine open matches to the newest when baseSha is omitted, but still throws when baseSha is supplied', () => {
+    // Regression test (Copilot review on bb805b2c, "Avoid ambiguous matches from stale fallback
+    // records"): a push-triggered rerun that supplies its own live baseSha never closes an older,
+    // now-stale fallback issue when base drift makes it file a fresh one instead (see the
+    // function's own doc comment). The review-path caller that omits baseSha must therefore
+    // tolerate both the stale and the fresh issue coexisting as open, structurally valid matches -
+    // and deterministically pick the most recently created one - rather than throwing ambiguity.
+    const marker = bootstrapPrFallbackIssueMarker(BOOTSTRAP_BRANCH);
+    const staleBaseSha = 'c'.repeat(40);
+    const freshBaseSha = 'd'.repeat(40);
+    const headSha = 'b'.repeat(40);
+    const makeIssue = (baseSha, createdAt) => {
+      const compareUrl = buildBootstrapPrFallbackCompareUrl({
+        repository: 'octo/example', baseBranch: 'main', headBranch: BOOTSTRAP_BRANCH,
+        title: BOOTSTRAP_PR_TITLE, server: 'https://github.com',
+      });
+      const provenanceLine = buildBootstrapPrFallbackProvenanceLine({
+        repository: 'octo/example', runId: '123', baseBranch: 'main', baseSha,
+        headBranch: BOOTSTRAP_BRANCH, headSha, compareUrl,
+      });
+      return {
+        state: 'open',
+        user: { login: 'github-actions[bot]', type: 'Bot' },
+        title: BOOTSTRAP_PR_FALLBACK_ISSUE_TITLE,
+        body: `${marker}\n${provenanceLine}\n${compareUrl}`,
+        created_at: createdAt,
+        updated_at: createdAt,
+      };
+    };
+    const staleIssue = makeIssue(staleBaseSha, '2026-01-01T00:00:00Z');
+    const freshIssue = makeIssue(freshBaseSha, '2026-01-02T00:00:00Z');
+    const expectedProvenanceWithoutBaseSha = { repository: 'octo/example', baseBranch: 'main', headSha };
+    // Review path (baseSha omitted): both coexist as valid matches; the newest wins regardless
+    // of array order.
+    expect(findExistingBootstrapPrFallbackIssue(
+      [staleIssue, freshIssue], BOOTSTRAP_BRANCH, expectedProvenanceWithoutBaseSha,
+    )).toBe(freshIssue);
+    expect(findExistingBootstrapPrFallbackIssue(
+      [freshIssue, staleIssue], BOOTSTRAP_BRANCH, expectedProvenanceWithoutBaseSha,
+    )).toBe(freshIssue);
+    // Push path (baseSha supplied): a genuine duplicate match *at that exact baseSha* is still an
+    // unresolvable ambiguity and must still fail closed - recency selection never masks a true
+    // same-baseSha race/duplicate.
+    const duplicateAtSameBaseSha = makeIssue(freshBaseSha, '2026-01-03T00:00:00Z');
+    expect(() => findExistingBootstrapPrFallbackIssue(
+      [freshIssue, duplicateAtSameBaseSha], BOOTSTRAP_BRANCH, { ...expectedProvenanceWithoutBaseSha, baseSha: freshBaseSha },
+    )).toThrow(/Ambiguous/);
+    // Review path (baseSha omitted) with a true same-baseSha duplicate (e.g. a racing concurrent
+    // rerun, not base-drift succession) must ALSO still fail closed: picking a newest-wins
+    // tiebreak only ever makes sense between records that disagree on base_sha.
+    expect(() => findExistingBootstrapPrFallbackIssue(
+      [freshIssue, duplicateAtSameBaseSha], BOOTSTRAP_BRANCH, expectedProvenanceWithoutBaseSha,
+    )).toThrow(/Ambiguous/);
+  });
 
   it('binds the fallback issue body to the exact compare URL and branch marker', () => {
     const compareUrl = 'https://github.com/octo/example/compare/main...squad%2Fbootstrap-cast?expand=1';
@@ -1616,12 +1670,13 @@ describe('gh-aw: squad-bootstrap pull-request fallback pure helpers (unit + muta
     ).toThrow(/signed provenance line/);
   });
 
-  it('tells the human to manually re-run bootstrap to generate the research issue before merge', () => {
-    // No GitHub event automatically re-triggers squad-bootstrap the moment this fallback issue is
-    // opened: the next automatic run only fires on a push to squad-related paths on the default
-    // branch (i.e. at merge time). A human who wants the linked research-proposals issue to exist
-    // before merging the Cast PR must be told, in this bot-authored issue body, to manually
-    // re-dispatch the workflow while the PR is still open.
+  it('tells the human that no automatic trigger ever reruns bootstrap, including after merge, and to manually re-dispatch', () => {
+    // Regression test (Copilot review on bb805b2c, "Bootstrap workflow misses Cast PR merge
+    // trigger"): squad-bootstrap.md's push trigger only watches Squad workflow-source paths, never
+    // the files a Cast PR adds/merges, so merging this manually created PR does NOT retrigger
+    // squad-bootstrap and must never be described as doing so. A human who wants the linked
+    // research-proposals issue to exist - before OR after merging the Cast PR - must be told, in
+    // this bot-authored issue body, to manually re-dispatch the workflow themselves either way.
     const compareUrl = 'https://github.com/octo/example/compare/main...squad%2Fbootstrap-cast?expand=1';
     const provenanceLine = buildBootstrapPrFallbackProvenanceLine({
       repository: 'octo/example',
@@ -1641,10 +1696,15 @@ describe('gh-aw: squad-bootstrap pull-request fallback pure helpers (unit + muta
       provenanceLine,
     });
     expect(body).toContain('Generate the linked research-proposals issue');
-    expect(body).toContain('manually');
+    expect(body).toContain('Manually re-run this workflow');
     expect(body).toContain('Actions tab');
     expect(body).toContain('Run workflow');
     expect(body).toContain('still open');
+    // Must never claim merging retriggers bootstrap automatically - mutation-kill anchor against
+    // reintroducing the disproven "automatic run ... after merge" claim.
+    expect(body).not.toMatch(/automatically.{0,40}after merge/i);
+    expect(body).not.toMatch(/push.{0,20}(which happens when|right after) (the )?(pull request )?(above )?(is )?merge/i);
+    expect(body).toContain('anytime after merging it');
     expect(body.indexOf('Create the pull request manually'))
       .toBeLessThan(body.indexOf('Generate the linked research-proposals issue'));
     expect(body.indexOf('Generate the linked research-proposals issue'))

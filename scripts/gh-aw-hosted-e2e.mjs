@@ -714,7 +714,8 @@ export function waitForBootstrapFallback(
 export function selectManualFallbackCastPr(outputs, fallbackIssue) {
   const provenance = parseBootstrapPrFallbackProvenance(fallbackIssue.body, 'Bootstrap fallback issue');
   const candidates = outputs.castPrs.filter((pr) => (
-    pr.headRefName === provenance.head_branch
+    pr.state === 'open'
+    && pr.headRefName === provenance.head_branch
     && pr.headRepository === outputs.target
     && pr.baseRefName === provenance.base_branch
     && pr.title === CAST_PR_TITLE
