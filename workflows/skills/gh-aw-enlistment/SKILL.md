@@ -138,11 +138,31 @@ the default workflow token:
 ```bash
 gh api --method PUT "repos/${owner_repo}/actions/permissions/workflow" \
   -f default_workflow_permissions=read \
-  -F can_approve_pull_request_reviews=true
+  -F can_approve_pull_request_reviews=false
 ```
 
-Without this, Squad still pushes the generated branch but falls back to an issue
-with a manual PR link — and a self-authored PR cannot be self-approved. Keep
+`can_approve_pull_request_reviews` is a single, combined GitHub toggle: it
+does not just govern whether `GITHUB_TOKEN` can *submit an approving review*
+— the same switch also gates whether `GITHUB_TOKEN` is permitted to *create*
+pull requests at all (GitHub returns the literal error "GitHub Actions is not
+permitted to create or approve pull requests" for both operations; they
+cannot be separated via job-level `permissions:` alone). GitHub's own API
+reference calls enabling it a security risk, so Squad keeps it `false` for
+least privilege and never relies on `GITHUB_TOKEN` to self-approve.
+
+With it `false`, the bootstrap job's own `github.rest.pulls.create` call will
+fail with that exact error. Squad's bootstrap workflow catches only that
+specific error and falls back automatically: it still pushes the
+`squad/bootstrap-cast` branch (the Cast PR's own branch — distinct from the
+`chore/squad-gh-aw-bootstrap` branch you create by hand in step 2 below),
+then opens (or, on a rerun, reuses) a tracking issue containing a
+ready-to-click GitHub compare URL
+(`.../compare/<base>...squad/bootstrap-cast?expand=1&title=...`) so a
+human can open the PR manually in one click. Any other pull-request creation
+error (for example, a PR that already exists) still fails the job normally —
+only this one documented, exact permission error is treated as expected.
+Every bootstrap and Cast PR, whichever way it is opened, still requires an
+independent human (or `@copilot`) approving review before merge. Keep
 `default_workflow_permissions=read`; do not set it to `write`.
 
 ### 2. Isolate the install on a bootstrap branch (preserve existing workflows)
@@ -156,12 +176,21 @@ git switch -c chore/squad-gh-aw-bootstrap
   not part of the Squad set. `gh aw add` is additive; if you see it about to
   replace an unrelated workflow, **STOP**.
 
-### 3. Resolve one immutable revision and install the native package
+### 3. Install the native package at an explicit, maintainer-approved revision
+
+`SQUAD_SHA` must be supplied by the caller before this step — a specific,
+already-reviewed 40-character commit SHA. Never derive it by resolving the
+`dev` branch's current tip: `dev` is a continuously moving integration branch,
+so resolving it at install time installs whatever happens to be on it at that
+exact moment, with no maintainer vetting of that specific revision. Obtain the
+current supported revision from the Squad maintainers or the project's
+published release guidance, then set it once:
 
 ```bash
-SQUAD_SHA="$(gh api repos/bradygaster/squad/commits/dev --jq '.sha')"
+# SQUAD_SHA="<40-character commit SHA supplied by the maintainers>"
+: "${SQUAD_SHA:?STOP: set SQUAD_SHA to an explicit, maintainer-approved 40-character Squad commit SHA before installing.}"
 [[ "${SQUAD_SHA}" =~ ^[0-9a-f]{40}$ ]] || {
-  echo "STOP: could not resolve an immutable 40-character Squad commit SHA." >&2
+  echo "STOP: SQUAD_SHA must be the exact 40-character commit SHA, not a branch name or shortened hash." >&2
   exit 1
 }
 gh aw add "bradygaster/squad/workflows@${SQUAD_SHA}"
@@ -198,8 +227,9 @@ without dispatch and is rechecked before outputs. Draft PRs and human merge
 remain mandatory; closed-unmerged PRs never cause automatic replacements.
 See the guide for content-hash calculation and the one-retry recovery policy.
 
-The `dev` channel is used only to resolve `SQUAD_SHA`; the install itself never
-uses a moving branch reference.
+`SQUAD_SHA` is supplied explicitly by the caller, never resolved from `dev`'s
+moving tip; the install itself only ever installs that one immutable,
+already-approved revision.
 
 ### 4. Review the first-install safe-update report — approve ONLY the documented entries
 
@@ -344,7 +374,9 @@ gh pr checks --watch
 ### 9. Verify the native review contract after merge
 
 The installation PR remains an explicit human trust boundary. After a human
-merges it, inspect the automatically opened Cast PR and require the native
+merges it, inspect the Cast PR — automatically opened, or manually opened by a
+human from the bootstrap fallback issue's compare-URL link when
+`GITHUB_TOKEN` cannot create it directly — and require the native
 `Squad Review / review` job from the base-controlled `pull_request_target`
 workflow to succeed. Verify the exact workflow path, immutable base/workflow
 SHA, PR base/head, run ID and attempt, successful `review` job, and exact-head
@@ -371,11 +403,28 @@ the workflow installation is merged and the post-merge Cast canary succeeds.
 - **Never** merge the bootstrap PR yourself. Merge happens **only** after human
   approval.
 - Make the two-PR flow explicit to the user: after the workflow-installation PR
-  reaches the default branch, `squad-bootstrap` automatically creates one
-  **draft, human-reviewed Cast PR** and one linked
-  `[Research Proposals] Agent-discovered repo opportunities` issue from the same
-  validated repository analysis. The user reviews and merges the Cast PR, then
-  follows the issue's `/squad research`, `/squad triage`, `/squad plan`, and
+  reaches the default branch, `squad-bootstrap` normally creates one **draft,
+  human-reviewed Cast PR** and one linked
+  `[Research Proposals] Agent-discovered repo opportunities` issue from the
+  same validated repository analysis. If `can_approve_pull_request_reviews`
+  is `false` (the recommended, least-privilege setting from step 4),
+  `GITHUB_TOKEN` cannot open that PR either; `squad-bootstrap` instead opens a
+  **bot-authored fallback issue** carrying a signed provenance record and a
+  ready-to-click compare URL, and Squad Review accepts the resulting
+  manually-opened PR in that one narrowly-scoped case (see "Optional: PAT
+  fallback" and the fallback-issue provenance contract in
+  `docs/src/content/docs/guide/gh-aw.md` for the exact trust conditions).
+  On the fallback path, no automatic trigger re-runs `squad-bootstrap` at any
+  point — **not** when the human opens that compare-URL PR, and **not** when
+  they later merge it either: `squad-bootstrap`'s push trigger only watches
+  the Squad workflow-source paths (for example `.github/workflows/squad*.md`),
+  and the manually-opened PR never touches any of those paths. The fallback
+  issue itself tells the user to manually re-run the Squad Bootstrap workflow
+  (`workflow_dispatch`) — either now, while the PR is still open, or anytime
+  after merging it — which deterministically detects the PR (open or merged)
+  and creates the linked research-proposals issue; no automatic trigger ever
+  does this for them. Either way, the user reviews and merges the Cast PR, then follows the
+  research issue's `/squad research`, `/squad triage`, `/squad plan`, and
   `/squad activate` instructions until assignable implementation issues exist.
 
 ## Examples
@@ -402,11 +451,15 @@ test "$(gh api "repos/${owner_repo}" --jq '.has_issues')" = "true" || {
 }
 
 gh api --method PUT "repos/${owner_repo}/actions/permissions/workflow" \
-  -f default_workflow_permissions=read -F can_approve_pull_request_reviews=true
+  -f default_workflow_permissions=read -F can_approve_pull_request_reviews=false
 
 git switch -c chore/squad-gh-aw-bootstrap
-SQUAD_SHA="$(gh api repos/bradygaster/squad/commits/dev --jq '.sha')"
-[[ "${SQUAD_SHA}" =~ ^[0-9a-f]{40}$ ]]
+# SQUAD_SHA is supplied explicitly (maintainer-approved), never resolved from dev's tip
+: "${SQUAD_SHA:?STOP: set SQUAD_SHA to an explicit, maintainer-approved 40-character Squad commit SHA.}"
+[[ "${SQUAD_SHA}" =~ ^[0-9a-f]{40}$ ]] || {
+  echo "STOP: SQUAD_SHA must be an explicit, maintainer-approved 40-character lowercase hex commit SHA." >&2
+  exit 1
+}
 gh aw add "bradygaster/squad/workflows@${SQUAD_SHA}"
 
 # Safe-update report shows ONLY the two documented secrets + squad-init → approve once
@@ -477,7 +530,8 @@ gh pr merge --squash                # auto-merge before human review. NEVER.
 - ❌ **Clobbering existing workflows.** The install is additive; preserve unrelated
   `.github/workflows/` files.
 - ❌ **Widening the default token.** Keep `default_workflow_permissions=read`.
-- ❌ **Auto-merging.** The workflow-installation PR and automatic Cast PR are
-  both human-reviewed. The dedicated bootstrap wakes only after installation
-  lands on the default branch.
+- ❌ **Auto-merging.** The workflow-installation PR and the Cast PR (automatic
+  or manually opened from the fallback issue) are both human-reviewed. The
+  dedicated bootstrap wakes only after installation lands on the default
+  branch.
 - ❌ **Opening the PR before the package verifier and strict compile pass.**

@@ -586,7 +586,7 @@ test "$(gh api "repos/${owner_repo}" --jq '.has_issues')" = "true" || {
   exit 1
 }
 
-SQUAD_SHA="$(gh api repos/bradygaster/squad/commits/dev --jq '.sha')"
+SQUAD_SHA="<40-character-commit-sha>"  # explicit, maintainer-approved; never `commits/dev`
 gh aw add "bradygaster/squad/workflows@${SQUAD_SHA}"
 git add -- \
   .github/aw/ \
@@ -599,8 +599,6 @@ git push
 
 `gh aw add` compiles the workflows automatically. If it reports unapproved
 safe-update changes, review them and run `gh aw compile --approve`.
-
-> `@dev` pulls the latest modes and fixes; switch to `@main` once gh-aw support is stable.
 
 Review the complete generated diff before you commit:
 

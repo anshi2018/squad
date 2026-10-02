@@ -327,6 +327,41 @@ describe('improvement: actual patch write set', () => {
   it.each(['100755', '120000', '160000'])('rejects transport mode %s', mode => {
     expect(gate.evaluatePatchScope(patchFor(PATH, mode), [PATH]).ok).toBe(false);
   });
+  // `diffFor` above only ever exercises a brand-new file ("new file mode" header
+  // lines). Real Git never emits those lines for a content-only edit of an
+  // ALREADY-TRACKED file: when the mode is unchanged, the mode appears solely as
+  // the trailing token on the `index <old>..<new> <mode>` line, e.g.
+  // `index aaa1111..bbb2222 100755`. An already-tracked executable Markdown
+  // skill (mode 100755) that an improvement patch only edits the body text of
+  // must still be rejected by that same `index`-line mode check -- not just by
+  // the "new file mode"/"old mode"/"new mode" header branch covered above.
+  const contentOnlyDiffFor = (path = PATH, mode = '100644') => [
+    `diff --git a/${path} b/${path}`, `index aaa1111..bbb2222 ${mode}`,
+    `--- a/${path}`, `+++ b/${path}`, '@@ -1 +1 @@', '-old content', '+new content', '',
+  ].join('\n');
+  it('rejects a content-only modification of an already-tracked executable (100755) Markdown target', () => {
+    const patch = mailboxOf(contentOnlyDiffFor(PATH, '100755'));
+    const result = gate.evaluatePatchScope(patch, [PATH]);
+    expect(result.ok).toBe(false);
+    expect(result.violations).toContainEqual({ kind: 'forbidden-file-mode' });
+  });
+  it('allows a content-only modification of an already-tracked non-executable (100644) target', () => {
+    // Positive control: proves the rejection above is specifically about the
+    // executable mode, not an artifact of the content-only (no mode-change
+    // headers) diff shape itself.
+    const patch = mailboxOf(contentOnlyDiffFor(PATH, '100644'));
+    expect(gate.evaluatePatchScope(patch, [PATH])).toMatchObject({ ok: true });
+  });
+  it('mutation proof: parsePatchEntries must itself capture the mode carried solely by the `index` line', () => {
+    // Exercises the exact regex branch a regression could silently drop
+    // (`/^index [0-9a-f]+\.\.[0-9a-f]+ (\d+)$/`) in isolation from the rest of
+    // evaluatePatchScope's Git-backed pipeline, so a change that stops parsing
+    // index-line modes fails here even if some other check coincidentally
+    // still rejected the same fixture.
+    const entries = gate.parsePatchEntries(contentOnlyDiffFor(PATH, '100755'));
+    expect(entries).toHaveLength(1);
+    expect(entries[0].modes).toEqual(['100755']);
+  });
   it('rejects an extra in-directory file the human never approved', () => {
     expect(gate.evaluatePatchScope(patchFor() + patchFor('.squad/skills/extra/SKILL.md'), [PATH]).ok).toBe(false);
   });
@@ -464,7 +499,13 @@ describe('improvement: one authorized dispatcher route and installed contract', 
     const skill = ROUTER.slice(ROUTER.indexOf('## skill: `squad-approve-improvement`'), ROUTER.indexOf('## skill: `squad-revoke-improvement`'));
     const payload = JSON.parse(skill.match(/```json\n([\s\S]*?)\n```/)![1]);
     expect(Object.keys(payload.inputs).sort()).toEqual(['approval_comment_id', 'issue_number', 'squad_approval_relay']);
-    expect(payload.inputs.squad_approval_relay).toMatchObject({ event_type: 'issue_comment', item_type: 'issue' });
+    // squad_approval_relay must be a JSON-encoded string, not a nested object: the
+    // receiving workflow declares it `type: string` and GitHub's workflow_dispatch
+    // REST input schema rejects a non-string value outright regardless of the
+    // declared type ("is not of a type(s) string"), so a nested object example
+    // would document a dispatch that can never actually be sent.
+    expect(typeof payload.inputs.squad_approval_relay).toBe('string');
+    expect(JSON.parse(payload.inputs.squad_approval_relay)).toMatchObject({ event_type: 'issue_comment', item_type: 'issue' });
     expect(payload.issue_number).toBeUndefined();
   });
   it.each([
@@ -498,6 +539,27 @@ describe('improvement: one authorized dispatcher route and installed contract', 
       expect(result.reason).toBe('approval-relay-context-invalid');
     }
   });
+  it('accepts an engine-reported item identity that is a native number rather than a decimal string (regression: canonical safe-integer identity, not strict type-sensitive equality)', async () => {
+    const origin = {
+      repo: REPO, workflow_id: `${REPO}/.github/workflows/squad.lock.yml@refs/heads/dev`,
+      event_type: 'issue_comment', item_type: 'issue', item_number: 77, comment_id: 901,
+    };
+    const routedEnv = { ...env(), GITHUB_ACTOR: 'github-actions[bot]', SQUAD_IMPROVE_AW_CONTEXT: JSON.stringify(origin) };
+    expect((await gate.collectImprovementContext(routedEnv, api())).authorized).toBe(true);
+  });
+  it.each(['77.0', '077', '-77', '77e0', '9007199254740993', '', null, true])(
+    'rejects a malformed or overflowing engine-reported item_number %s even though it would loosely compare equal to 77',
+    async malformed => {
+      const origin = {
+        repo: REPO, workflow_id: `${REPO}/.github/workflows/squad.lock.yml@refs/heads/dev`,
+        event_type: 'issue_comment', item_type: 'issue', item_number: malformed, comment_id: '901',
+      };
+      const routedEnv = { ...env(), GITHUB_ACTOR: 'github-actions[bot]', SQUAD_IMPROVE_AW_CONTEXT: JSON.stringify(origin) };
+      const result = await gate.collectImprovementContext(routedEnv, api());
+      expect(result.authorized).toBe(false);
+      expect(result.reason).toBe('approval-relay-context-invalid');
+    },
+  );
   it('strict-compiles the am transport, exact allowlist and before-handler live gate', () => {
     const root = scratch();
     cpSync(resolve(ROOT, 'workflows'), join(root, '.github', 'workflows'), { recursive: true });
@@ -642,6 +704,22 @@ describe('improvement: second-hop relay context survives gh-aw engine aw_context
       expect(result.reason).toBe('approval-relay-context-invalid');
     }
   });
+  it('accepts a relay-forwarded item identity that is a native number rather than a decimal string', async () => {
+    const result = await gate.collectImprovementContext({
+      ...routedEnv, SQUAD_IMPROVE_RELAY_CONTEXT: JSON.stringify({ ...relayContext, item_number: 77, comment_id: 901 }),
+    }, api());
+    expect(result.authorized).toBe(true);
+  });
+  it.each(['77.0', '077', '-77', '77e0', '9007199254740993', ''])(
+    'rejects a malformed or overflowing relay-forwarded item_number %s even though it would loosely compare equal to 77',
+    async malformed => {
+      const result = await gate.collectImprovementContext({
+        ...routedEnv, SQUAD_IMPROVE_RELAY_CONTEXT: JSON.stringify({ ...relayContext, item_number: malformed }),
+      }, api());
+      expect(result.authorized).toBe(false);
+      expect(result.reason).toBe('approval-relay-context-invalid');
+    },
+  );
   it('does not regress the native direct-comment path (engine context alone remains authoritative there)', async () => {
     const nativeOrigin = {
       repo: REPO, workflow_id: `${REPO}/.github/workflows/squad.lock.yml@refs/heads/dev`,

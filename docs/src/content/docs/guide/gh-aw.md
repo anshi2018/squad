@@ -74,15 +74,18 @@ test "$(gh api "repos/${owner_repo}" --jq '.has_issues')" = "true" || {
 
 gh api --method PUT "repos/${owner_repo}/actions/permissions/workflow" \
   -f default_workflow_permissions=read \
-  -F can_approve_pull_request_reviews=true
+  -F can_approve_pull_request_reviews=false
 
 # 3. Create a bootstrap branch
 git switch -c chore/squad-gh-aw-bootstrap
 
-# 4. Resolve the supported channel once, then install the complete native package
-SQUAD_SHA="$(gh api repos/bradygaster/squad/commits/dev --jq '.sha')"
+# 4. Install the complete native package at an explicit, maintainer-approved
+# revision. SQUAD_SHA is never resolved from the `dev` branch's moving tip —
+# ask the Squad maintainers (or check the project's published release
+# guidance) for the current supported revision.
+SQUAD_SHA="<40-character-commit-sha>"
 [[ "${SQUAD_SHA}" =~ ^[0-9a-f]{40}$ ]] || {
-  echo "STOP: could not resolve an immutable 40-character Squad commit SHA." >&2
+  echo "STOP: SQUAD_SHA must be an explicit 40-character Squad commit SHA, not a branch name or shortened hash." >&2
   exit 1
 }
 
@@ -233,25 +236,83 @@ in repository settings, then rerun the supported quick start.
 
 ### Allow workflow-created pull requests
 
-Squad opens pull requests through GitHub Actions. Enable this repository setting
-under **Settings → Actions → General → Workflow permissions → Allow GitHub
-Actions to create and approve pull requests**.
+Squad opens pull requests through GitHub Actions. Keep this repository setting
+**disabled** under **Settings → Actions → General → Workflow permissions →
+Allow GitHub Actions to create and approve pull requests**.
 
-You can also enable it from the command line while keeping the default workflow
+Set it explicitly from the command line while keeping the default workflow
 token read-only:
 
 ```bash
 owner_repo="$(gh repo view --json nameWithOwner --jq '.nameWithOwner')"
 gh api --method PUT "repos/${owner_repo}/actions/permissions/workflow" \
   -f default_workflow_permissions=read \
-  -F can_approve_pull_request_reviews=true
+  -F can_approve_pull_request_reviews=false
 ```
 
 Resolve the repository identity at runtime as shown; do not hardcode an example
-owner or repository. Without this setting, Squad pushes the generated branch but
-falls back to an issue containing a link for you to create the pull request
-manually. A manually created pull request is authored by your account, and
-GitHub does not allow authors to approve their own pull requests.
+owner or repository. This single GitHub toggle gates both `GITHUB_TOKEN`
+pull-request **creation** and review **approval** together — they cannot be
+separated with job-level `permissions:` alone, and GitHub's own API reference
+calls enabling it a security risk. With it disabled, `squad-bootstrap` still
+pushes the generated branch, then catches the exact GitHub Actions
+permission-denied error from `github.rest.pulls.create` and falls back to an
+issue containing a ready-to-click compare URL for you to create the pull
+request manually. Every bootstrap and Cast PR, whichever way it is opened,
+still requires an independent human (or `@copilot`) approving review before
+merge — `GITHUB_TOKEN` is never used to self-approve.
+
+The manually created pull request from that compare-URL link is human-authored
+(no bot provenance comment exists on it), so it cannot satisfy Squad Review's
+ordinary base-controlled bootstrap provenance check by itself. Instead, Squad
+Review re-verifies it against the **bot-authored fallback issue's signed
+provenance record**. That issue (opened by `squad-bootstrap` only after the
+automated pull-request creation call was permission-denied) embeds a
+machine-readable, HTML-comment-delimited JSON record binding the repository,
+the triggering bootstrap workflow run, the exact base commit the record was
+signed against, the exact base and pushed head branches, the exact pushed
+head commit SHA, and the exact compare URL. Squad Review accepts the
+manually opened pull request in place of bot authorship
+only when **all** of the following hold, otherwise it fails closed with the
+unchanged bootstrap-provenance error:
+
+- the pull request's own title is the canonical Cast title — the same check
+  the ordinary (non-fallback) path already applies, so a manually opened PR
+  with an arbitrary title is rejected just as `classifyBootstrapState()`
+  would reject it later;
+- the fallback issue is open, bot-authored, carries the expected title and
+  branch marker, and was never edited after creation (`updated_at ===
+  created_at`);
+- among every *bot-authored, correctly titled, valid-provenance* open issue
+  for the branch, the single most recently created one is selected — an issue
+  missing any of those qualifiers is excluded before this selection, so it can
+  neither suppress the real fallback issue nor be selected in its place. This
+  lookup intentionally tolerates more than one such issue coexisting: a prior
+  base-drifted record is never closed when a fresh one is filed (recovery
+  must never permanently stall), so an older, now-stale issue can remain open
+  alongside the current one. Selecting by recency cannot by itself admit a
+  record the next two checks would otherwise reject — those checks
+  independently re-verify the *selected* record's exact field match and its
+  base commit's live ancestry, so an attacker gains nothing from leaving a
+  genuine old issue open;
+- the issue's signed record parses and its `repository`, `base_branch`,
+  `base_sha`, `head_branch`, and `head_sha` fields exactly match the live
+  pull request, and its `compare_url` exactly matches the reconstructed
+  expected link;
+- the issue was created at or before the pull request (it cannot be
+  backdated to retroactively legitimize an unrelated PR); and
+- the record's referenced bootstrap run is a successful `push`-triggered run
+  of the bootstrap workflow, in this repository, whose `head_sha` matches the
+  pull request's exact base commit (not merely the same base branch name).
+
+Every other review, provenance, content, and head-pinning check this workflow
+performs is unchanged — this exception replaces only the pull-request-author
+bot-attribution predicate for this one narrowly-scoped case. An unrelated
+human-authored pull request on any other branch, or one without a matching
+signed fallback issue, still receives the ordinary unchanged bootstrap
+provenance rejection. As with every Squad-opened pull request, merging still
+requires an independent human (or `@copilot`) approving review — `GITHUB_TOKEN`
+is never used to self-approve.
 
 ### Create a bootstrap branch
 
@@ -266,9 +327,12 @@ compilation and human review are complete.
 ### Install the workflows
 
 ```bash
-SQUAD_SHA="$(gh api repos/bradygaster/squad/commits/dev --jq '.sha')"
+# SQUAD_SHA must be an explicit, maintainer-approved 40-character commit SHA.
+# Never resolve it from `dev`'s moving tip (`commits/dev`) — that would install
+# an unbounded, mutable revision instead of one reviewed, immutable commit.
+SQUAD_SHA="<40-character-commit-sha>"
 [[ "${SQUAD_SHA}" =~ ^[0-9a-f]{40}$ ]] || {
-  echo "STOP: could not resolve an immutable 40-character Squad commit SHA." >&2
+  echo "STOP: SQUAD_SHA must be an explicit 40-character Squad commit SHA, not a branch name or shortened hash." >&2
   exit 1
 }
 gh aw add "bradygaster/squad/workflows@${SQUAD_SHA}"
@@ -313,9 +377,10 @@ auto-implementation](#retrospective-auto-implementation-opt-in) below).
 `gh aw add` also installs the Squad skills under `.github/skills/`, which is why
 the bootstrap commit stages that path alongside the workflows.
 
-> **Revision note:** `dev` is resolved once to `SQUAD_SHA`; the package install
-> itself uses only that immutable commit. Never install different Squad files
-> from different refs.
+> **Revision note:** `SQUAD_SHA` is an explicit, maintainer-approved commit —
+> never resolved from `dev`'s moving tip. The package install itself uses only
+> that one immutable commit. Never install different Squad files from
+> different refs.
 
 This registers the Squad workflow in your repository's agentic workflow
 configuration and compiles the workflow definitions into deterministic
@@ -513,8 +578,8 @@ Use this checklist for the initial bootstrap and after any workflow update:
 | Install | Run the eight-workflow `gh aw add` command on a bootstrap branch | All eight `.md`/`.lock.yml` pairs exist, with shared imports, `.github/aw/`, installed skills, and `.gitattributes` included in the diff |
 | Compile | Review any first-install safe-update report, approve only the documented entries, then run `gh aw compile --strict` without approval | All eight workflows succeed, only documented warnings remain, and all sixteen source/lock files exist |
 | Bootstrap review | Open the installation PR, request `@copilot`, inspect verifier/compile evidence, and merge only after human approval | The run reports the explicit first-install manual boundary; no `Squad-Review-Verdict:` record or PR-controlled check is treated as trusted |
-| Activation canary | Merge the workflow-installation PR and inspect the automatically opened draft Cast PR | `Squad Review / review` succeeds with reserved bootstrap roles only after loading the guard and manifest from the exact base commit and validating the default-branch bootstrap run |
-| Automatic bootstrap | Continue only after the Cast PR activation canary succeeds | The dedicated workflow's draft Cast PR and linked research-proposals issue share the same validated base-controlled provenance |
+| Activation canary | Merge the workflow-installation PR and inspect the Cast PR — automatically opened, or manually opened by a human from the bootstrap fallback issue's compare-URL link when `can_approve_pull_request_reviews=false` blocks direct creation | `Squad Review / review` succeeds with reserved bootstrap roles only after loading the guard and manifest from the exact base commit and validating the default-branch bootstrap run — including, for a manually opened PR, the signed fallback-issue provenance record |
+| Automatic bootstrap | Continue only after the Cast PR activation canary succeeds | The dedicated workflow's Cast PR shares the same validated base-controlled provenance; the linked research-proposals issue is opened on the bootstrap run that recognizes the Cast PR, whether that PR was opened automatically or manually from a fallback issue |
 | Cast persistence | Review the Cast PR before merging | The PR contains `.squad/casting/policy.json`, `registry.json`, and `history.json`, plus the team, routing, charters, Copilot agent, and `meet-the-squad.md` |
 | Research backlog | Follow the proposal issue through research, triage, plan, and activate | The journey ends with assignable implementation issues; `/squad implement` is used only on those generated tasks |
 | Cast checks | Open the linked Cast PR and inspect its checks; if application CI is `action_required`, approve that workflow run and wait for it to finish | Copilot review and the repository's normal build, test, lint, and security checks complete before merge |
