@@ -275,10 +275,20 @@ export const BOOTSTRAP_PR_FALLBACK_PROVENANCE_PREFIX = '<' + '!-- squad:bootstra
 
 // Builds the machine-readable, signed-by-context record embedded in the bootstrap PR
 // fallback issue body. This binds the issue to one exact repository, base-controlled
-// bootstrap run, base branch, pushed Cast branch, its exact head SHA, and the manual
-// compare URL a human is asked to open — so squad-review-guard can later re-verify a
-// human-authored Cast PR against this record instead of forgeable free text.
-export function buildBootstrapPrFallbackProvenanceLine({ repository, runId, baseBranch, headBranch, headSha, compareUrl }) {
+// bootstrap run, base branch, its exact commit SHA at run time, pushed Cast branch, its
+// exact head SHA, and the manual compare URL a human is asked to open — so
+// squad-review-guard can later re-verify a human-authored Cast PR against this record
+// instead of forgeable free text.
+//
+// `baseSha` is recorded (not just `base_branch`) so a later rerun's dedupe lookup
+// (findExistingBootstrapPrFallbackIssue below) can detect, without any extra API call,
+// that the default branch advanced past the commit this record was bound to: the Cast
+// branch itself is reused unchanged across reruns (so `head_sha` alone never reflects
+// base drift), but `base_branch` names on the same default branch every time too, so
+// neither field alone proves the record is still current for *this* base commit.
+export function buildBootstrapPrFallbackProvenanceLine({
+  repository, runId, baseBranch, baseSha, headBranch, headSha, compareUrl,
+}) {
   if (typeof repository !== 'string' || !/^[^/\s]+\/[^/\s]+$/.test(repository)) {
     throw new Error('Bootstrap PR fallback provenance requires an owner/repo repository identity.');
   }
@@ -287,6 +297,9 @@ export function buildBootstrapPrFallbackProvenanceLine({ repository, runId, base
   }
   if (typeof baseBranch !== 'string' || baseBranch.length === 0) {
     throw new Error('Bootstrap PR fallback provenance requires a base branch.');
+  }
+  if (typeof baseSha !== 'string' || !/^[0-9a-f]{40}$/.test(baseSha)) {
+    throw new Error('Bootstrap PR fallback provenance requires a 40-character lowercase base SHA.');
   }
   if (typeof headBranch !== 'string' || headBranch.length === 0) {
     throw new Error('Bootstrap PR fallback provenance requires a head branch.');
@@ -302,6 +315,7 @@ export function buildBootstrapPrFallbackProvenanceLine({ repository, runId, base
     repository,
     run_id: String(runId),
     base_branch: baseBranch,
+    base_sha: baseSha,
     head_branch: headBranch,
     head_sha: headSha,
     compare_url: compareUrl,
@@ -324,12 +338,13 @@ export function parseBootstrapPrFallbackProvenance(body) {
     return null;
   }
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
-  const keys = ['schema', 'repository', 'run_id', 'base_branch', 'head_branch', 'head_sha', 'compare_url'];
+  const keys = ['schema', 'repository', 'run_id', 'base_branch', 'base_sha', 'head_branch', 'head_sha', 'compare_url'];
   if (Object.keys(value).sort().join('\0') !== [...keys].sort().join('\0')) return null;
   if (value.schema !== 1) return null;
   if (typeof value.repository !== 'string') return null;
   if (!/^[1-9]\d*$/.test(String(value.run_id ?? ''))) return null;
   if (typeof value.base_branch !== 'string' || value.base_branch.length === 0) return null;
+  if (!/^[0-9a-f]{40}$/.test(String(value.base_sha ?? ''))) return null;
   if (typeof value.head_branch !== 'string' || value.head_branch.length === 0) return null;
   if (!/^[0-9a-f]{40}$/.test(String(value.head_sha ?? ''))) return null;
   if (typeof value.compare_url !== 'string' || !value.compare_url.startsWith('https://')) return null;
@@ -371,26 +386,58 @@ export function buildBootstrapPrFallbackCompareUrl({ repository, baseBranch, hea
 // exact fallback title, an unedited issue, and a structurally valid provenance
 // record closes both paths; only a genuinely duplicated legitimate fallback issue
 // (e.g. from a race between two runs) can still trigger the ambiguity error below.
-export function findExistingBootstrapPrFallbackIssue(issues, headBranch) {
+//
+// `expectedProvenance` (repository, baseBranch, baseSha, headSha) additionally rejects
+// a structurally valid match whose *recorded* provenance has gone stale relative to the
+// caller's current state — most importantly `baseSha`: the Cast branch is reused
+// unchanged across reruns (so a record's `head_sha` never reflects base drift), and
+// `base_branch` names the same default branch every time, so neither alone proves a
+// record still describes the live default-branch commit. Without this, once the default
+// branch advances past the commit an open fallback issue was bound to, this dedupe would
+// keep matching that now-permanently-rejectable issue (validateBootstrapPrFallbackAttribution
+// requires `run.head_sha === pr.base.sha`, which can never hold again for the stale
+// record), so the caller would keep skipping replacement and manual recovery could never
+// complete. Filtering staleness out here lets the caller fall through to opening a fresh,
+// currently valid fallback issue instead.
+export function findExistingBootstrapPrFallbackIssue(issues, headBranch, expectedProvenance) {
   if (!Array.isArray(issues)) {
     throw new Error('Bootstrap PR fallback dedupe requires an issues array.');
   }
+  if (
+    typeof expectedProvenance?.repository !== 'string' || expectedProvenance.repository.length === 0 ||
+    typeof expectedProvenance?.baseBranch !== 'string' || expectedProvenance.baseBranch.length === 0 ||
+    !/^[0-9a-f]{40}$/.test(String(expectedProvenance?.baseSha ?? '')) ||
+    !/^[0-9a-f]{40}$/.test(String(expectedProvenance?.headSha ?? ''))
+  ) {
+    throw new Error('Bootstrap PR fallback dedupe requires expected repository, baseBranch, baseSha, and headSha.');
+  }
   const marker = bootstrapPrFallbackIssueMarker(headBranch);
-  const matches = issues.filter((issue) => (
-    issue?.state === 'open' &&
-    issue?.user?.login === 'github-actions[bot]' &&
-    issue?.user?.type === 'Bot' &&
-    issue?.title === BOOTSTRAP_PR_FALLBACK_ISSUE_TITLE &&
-    // Mirrors validateBootstrapPrFallbackAttribution's unedited-issue requirement: an edited
-    // issue can never pass that review check, so treating it as a dedupe match here would
-    // make the caller skip creating a usable replacement and stall the manual recovery path.
-    typeof issue?.created_at === 'string' &&
-    issue.created_at.length > 0 &&
-    issue.updated_at === issue.created_at &&
-    typeof issue?.body === 'string' &&
-    issue.body.includes(marker) &&
-    parseBootstrapPrFallbackProvenance(issue.body) !== null
-  ));
+  const matches = issues.filter((issue) => {
+    if (
+      issue?.state !== 'open' ||
+      issue?.user?.login !== 'github-actions[bot]' ||
+      issue?.user?.type !== 'Bot' ||
+      issue?.title !== BOOTSTRAP_PR_FALLBACK_ISSUE_TITLE ||
+      // Mirrors validateBootstrapPrFallbackAttribution's unedited-issue requirement: an edited
+      // issue can never pass that review check, so treating it as a dedupe match here would
+      // make the caller skip creating a usable replacement and stall the manual recovery path.
+      typeof issue?.created_at !== 'string' ||
+      issue.created_at.length === 0 ||
+      issue.updated_at !== issue.created_at ||
+      typeof issue?.body !== 'string' ||
+      !issue.body.includes(marker)
+    ) {
+      return false;
+    }
+    const provenance = parseBootstrapPrFallbackProvenance(issue.body);
+    return (
+      provenance !== null &&
+      provenance.repository === expectedProvenance.repository &&
+      provenance.base_branch === expectedProvenance.baseBranch &&
+      provenance.base_sha === expectedProvenance.baseSha &&
+      provenance.head_sha === expectedProvenance.headSha
+    );
+  });
   if (matches.length > 1) {
     throw new Error('Ambiguous bootstrap PR fallback issues: found multiple open matches for the same branch.');
   }

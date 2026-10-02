@@ -172,15 +172,29 @@ function bootstrapRecord(body, label = 'bootstrap provenance') {
 // impossible to merge), this function replaces only the PR-author bot-attribution predicate with a
 // narrowly-scoped trusted path: the human PR is eligible for review only when live GitHub data exactly
 // matches a bot-authored, unedited, open bootstrap-PR-fallback issue carrying a signed provenance record
-// binding this exact repository, base branch, pushed Cast branch, its exact head SHA, the base-controlled
-// bootstrap run that produced it, and the manual compare URL. Every other review/provenance/content/head
+// binding this exact repository, base branch, its exact base commit SHA, pushed Cast branch, its exact
+// head SHA, the base-controlled bootstrap run that produced it, and the manual compare URL. Every other
+// review/provenance/content/head
 // check (SHA pinning, default-branch targeting, workflow-source binding, etc.) is enforced unchanged by
 // the surrounding `reviewTarget`. This never relies on `pulls.create`/review-approval permissions.
 async function validateBootstrapPrFallbackAttribution(env, get, repository, pr, requireRunSuccess) {
   requireThat(pr.head.ref === BOOTSTRAP_BRANCH && pr.user?.type === 'User',
     'pull request does not match the documented manual Cast fallback shape');
+  // Mirrors validateBootstrapAttribution's own `pr.title === BOOTSTRAP_TITLE` requirement below:
+  // without it, a manually opened PR with an arbitrary title passes this review path (the compare
+  // URL a human is asked to open already pre-fills this exact title via its `title` query param),
+  // but classifyBootstrapState() rejects any PR on this branch with another title, so a manual
+  // bootstrap rerun — or the post-merge bootstrap run itself — would then fail before ever creating
+  // the linked research-proposals issue.
+  requireThat(pr.title === BOOTSTRAP_TITLE,
+    'pull request does not match the documented manual Cast fallback shape');
   const issues = await list(get, `repos/${repository}/issues`);
-  const fallbackIssue = findExistingBootstrapPrFallbackIssue(issues, BOOTSTRAP_BRANCH);
+  const fallbackIssue = findExistingBootstrapPrFallbackIssue(issues, BOOTSTRAP_BRANCH, {
+    repository,
+    baseBranch: pr.base.ref,
+    baseSha: pr.base.sha,
+    headSha: pr.head.sha,
+  });
   requireThat(fallbackIssue, 'missing base-controlled bootstrap PR fallback issue');
   requireThat(fallbackIssue.user?.login === BOT && fallbackIssue.user?.type === 'Bot',
     'bootstrap PR fallback issue is not bot-authored');
@@ -197,6 +211,7 @@ async function validateBootstrapPrFallbackAttribution(env, get, repository, pr, 
   requireThat(
     provenance.repository === repository &&
     provenance.base_branch === pr.base.ref &&
+    provenance.base_sha === pr.base.sha &&
     provenance.head_branch === pr.head.ref &&
     provenance.head_sha === pr.head.sha,
     'bootstrap PR fallback provenance does not match this pull request',

@@ -191,6 +191,7 @@ function makeBootstrap(f: ReturnType<typeof fixture>) {
 type BootstrapPrFallbackIssueOptions = {
   headBranch: string;
   baseBranch: string;
+  baseSha?: string;
   headSha?: string;
   runId?: string;
   createdAt?: string;
@@ -205,7 +206,7 @@ type BootstrapPrFallbackIssueOptions = {
 
 function makeBootstrapPrFallbackIssue(options: BootstrapPrFallbackIssueOptions) {
   const {
-    headBranch, baseBranch, headSha = HEAD, runId = '29', createdAt = START, updatedAt = createdAt,
+    headBranch, baseBranch, baseSha = BASE, headSha = HEAD, runId = '29', createdAt = START, updatedAt = createdAt,
     author = { login: 'github-actions[bot]', type: 'Bot' },
     title = BOOTSTRAP_PR_FALLBACK_ISSUE_TITLE, state = 'open',
     compareUrlOverride, omitProvenance = false, omitMarker = false,
@@ -214,7 +215,7 @@ function makeBootstrapPrFallbackIssue(options: BootstrapPrFallbackIssueOptions) 
     repository: REPOSITORY, baseBranch, headBranch, title: '[squad] Cast your Squad', server: 'https://github.com',
   });
   const provenanceLine = omitProvenance ? '' : `${buildBootstrapPrFallbackProvenanceLine({
-    repository: REPOSITORY, runId, baseBranch, headBranch, headSha,
+    repository: REPOSITORY, runId, baseBranch, baseSha, headBranch, headSha,
     compareUrl: compareUrlOverride ?? compareUrl,
   })}\n`;
   const marker = omitMarker ? '' : `${bootstrapPrFallbackIssueMarker(headBranch)}\n`;
@@ -232,19 +233,21 @@ function makeBootstrapPrFallbackIssue(options: BootstrapPrFallbackIssueOptions) 
 // after automated pull request creation was permission-denied (documented alongside item 8's mandatory
 // `can_approve_pull_request_reviews: false` policy). This PR carries no bot provenance comment; squad
 // review re-verifies it against the bot-authored, signed fallback issue's provenance record instead.
+// Its title must still be the canonical Cast title: the compare URL a human is asked to open already
+// pre-fills it, and classifyBootstrapState() rejects any PR on this branch with another title.
 function makeBootstrapPrFallback(
   f: ReturnType<typeof fixture>,
   issueOverrides: Partial<BootstrapPrFallbackIssueOptions> = {},
 ) {
   f.state.missingManifest = true;
-  f.pr.title = 'Manually opened Cast PR';
+  f.pr.title = '[squad] Cast your Squad';
   f.pr.user = { login: 'human', type: 'User' };
   f.pr.head.ref = 'squad/bootstrap-cast';
   f.pr.head.sha = HEAD;
   f.pr.created_at = START;
   f.pr.body = 'Opened manually from the fallback issue compare link.';
   f.state.repoIssues = [makeBootstrapPrFallbackIssue({
-    headBranch: 'squad/bootstrap-cast', baseBranch: f.pr.base.ref, headSha: HEAD, runId: '29',
+    headBranch: 'squad/bootstrap-cast', baseBranch: f.pr.base.ref, baseSha: f.pr.base.sha, headSha: HEAD, runId: '29',
     createdAt: START, ...issueOverrides,
   })];
   f.sync();
@@ -378,13 +381,25 @@ describe('independent Squad review guard', () => {
   it('does not extend the fallback trust path to an unrelated PR on the Cast branch with no matching issue', async () => {
     const f = fixture();
     f.state.missingManifest = true;
-    f.pr.title = 'Unrelated change';
+    // Canonical title so this isolates the "no matching fallback issue" rejection path from the
+    // separate (also-covered) wrong-title rejection path.
+    f.pr.title = '[squad] Cast your Squad';
     f.pr.user = { login: 'human', type: 'User' };
     f.pr.head.ref = 'squad/bootstrap-cast';
     f.pr.body = 'No fallback issue exists for this branch.';
     f.state.repoIssues = [];
     await expect(reviewTarget(f.env, f.get)).rejects.toThrow(
       'missing base-controlled bootstrap PR fallback issue',
+    );
+  });
+
+  it('rejects a fallback-path PR with a non-canonical title even if a matching fallback issue exists', async () => {
+    const f = fixture();
+    makeBootstrapPrFallback(f);
+    f.pr.title = 'Manually opened Cast PR';
+    f.sync();
+    await expect(reviewTarget(f.env, f.get)).rejects.toThrow(
+      'pull request does not match the documented manual Cast fallback shape',
     );
   });
 
@@ -449,6 +464,11 @@ describe('independent Squad review guard', () => {
     ['bound to the wrong base branch', (f: ReturnType<typeof fixture>) => {
       f.state.repoIssues = [makeBootstrapPrFallbackIssue({
         headBranch: 'squad/bootstrap-cast', baseBranch: 'main', headSha: HEAD,
+      })];
+    }],
+    ['bound to a stale base commit SHA (the default branch advanced since the issue was opened)', (f: ReturnType<typeof fixture>) => {
+      f.state.repoIssues = [makeBootstrapPrFallbackIssue({
+        headBranch: 'squad/bootstrap-cast', baseBranch: f.pr.base.ref, baseSha: '9'.repeat(40), headSha: HEAD,
       })];
     }],
     ['bound to the wrong head branch', (f: ReturnType<typeof fixture>) => {

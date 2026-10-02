@@ -161,7 +161,7 @@ pre-agent-steps:
       # BEGIN GENERATED RESOURCE DIGESTS
       check_hash "$install_verifier" "cf474be9b04d339f7e7a18c65e776b8a53e84bea5b4b85abfe65ed11f7b782ce"
       check_hash "$cast_validator" "c6d0b92aac71dc6f6d5727cac418a323b0bc9c12047400faa12d96150d548ada"
-      check_hash "$bootstrap_validator" "2aabf1a4d4b1ee1e503e85c10fa07c904fadb7adf2bcb199057e9f7aec30e86e"
+      check_hash "$bootstrap_validator" "6abfd2177b813c19edbc28424be710dd6dd10c9afd8663a6e0b0332d29063171"
       # END GENERATED RESOURCE DIGESTS
       node "$bootstrap_validator" \
         --encode-payload "${GITHUB_WORKSPACE:?}/.github/workflows/squad-bootstrap-payload.json" \
@@ -178,7 +178,7 @@ pre-agent-steps:
 safe-outputs:
   report-failed-jobs: false
   messages:
-    run-success: "🤖 [{workflow_name}]({run_url}) finished. Review the linked draft Cast PR and research-proposals issue before activating work."
+    run-success: "🤖 [{workflow_name}]({run_url}) finished. Review what it created before activating work: normally a linked draft Cast PR and research-proposals issue, or — if Actions could not open the pull request — a fallback issue with a manual compare-URL link instead."
     run-failure: "🤖 [{workflow_name}]({run_url}) failed closed. No replacement bootstrap artifact was authorized."
   jobs:
     materialize-bootstrap:
@@ -497,9 +497,21 @@ safe-outputs:
                     title: stateModule.BOOTSTRAP_PR_TITLE,
                     server: process.env.GITHUB_SERVER_URL,
                   });
+                  // context.sha is the default branch's exact commit this run executed on (the
+                  // top-level `if: github.ref_name == github.event.repository.default_branch`
+                  // guards both the push and workflow_dispatch trigger paths), so it is a
+                  // reliable, zero-extra-API-call stand-in for "the base commit any fresh
+                  // provenance record produced by this run would be bound to".
+                  const baseSha = context.sha;
                   const existingFallback = stateModule.findExistingBootstrapPrFallbackIssue(
                     snapshot.issues,
                     stateModule.BOOTSTRAP_BRANCH,
+                    {
+                      repository,
+                      baseBranch: process.env.SQUAD_BOOTSTRAP_DEFAULT_BRANCH,
+                      baseSha,
+                      headSha: pushedRef.object.sha,
+                    },
                   );
                   if (existingFallback) {
                     core.info(
@@ -512,6 +524,7 @@ safe-outputs:
                     repository,
                     runId: process.env.SQUAD_BOOTSTRAP_RUN_ID,
                     baseBranch: process.env.SQUAD_BOOTSTRAP_DEFAULT_BRANCH,
+                    baseSha,
                     headBranch: stateModule.BOOTSTRAP_BRANCH,
                     headSha: pushedRef.object.sha,
                     compareUrl,

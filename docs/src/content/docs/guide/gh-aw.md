@@ -269,22 +269,31 @@ Review re-verifies it against the **bot-authored fallback issue's signed
 provenance record**. That issue (opened by `squad-bootstrap` only after the
 automated pull-request creation call was permission-denied) embeds a
 machine-readable, HTML-comment-delimited JSON record binding the repository,
-the triggering bootstrap workflow run, the exact base and pushed head
-branches, the exact pushed head commit SHA, and the exact compare URL. Squad
-Review accepts the manually opened pull request in place of bot authorship
+the triggering bootstrap workflow run, the exact base commit the record was
+signed against, the exact base and pushed head branches, the exact pushed
+head commit SHA, and the exact compare URL. Squad Review accepts the
+manually opened pull request in place of bot authorship
 only when **all** of the following hold, otherwise it fails closed with the
 unchanged bootstrap-provenance error:
 
+- the pull request's own title is the canonical Cast title — the same check
+  the ordinary (non-fallback) path already applies, so a manually opened PR
+  with an arbitrary title is rejected just as `classifyBootstrapState()`
+  would reject it later;
 - the fallback issue is open, bot-authored, carries the expected title and
   branch marker, and was never edited after creation (`updated_at ===
   created_at`);
-- exactly one such *bot-authored, correctly titled, valid-provenance* open
-  fallback issue exists for the branch — an issue missing any of those
-  qualifiers is excluded before counting, so it can neither suppress the real
-  fallback issue nor manufacture ambiguity;
+- exactly one such *bot-authored, correctly titled, valid-provenance,
+  currently-bound* open fallback issue exists for the branch — an issue
+  missing any of those qualifiers, or bound to a base commit the default
+  branch has since advanced past, is excluded before counting, so it can
+  neither suppress the real fallback issue nor manufacture ambiguity (and a
+  base-drifted record never permanently blocks recovery: a fresh fallback
+  issue is filed instead);
 - the issue's signed record parses and its `repository`, `base_branch`,
-  `head_branch`, and `head_sha` fields exactly match the live pull request,
-  and its `compare_url` exactly matches the reconstructed expected link;
+  `base_sha`, `head_branch`, and `head_sha` fields exactly match the live
+  pull request, and its `compare_url` exactly matches the reconstructed
+  expected link;
 - the issue was created at or before the pull request (it cannot be
   backdated to retroactively legitimize an unrelated PR); and
 - the record's referenced bootstrap run is a successful `push`-triggered run

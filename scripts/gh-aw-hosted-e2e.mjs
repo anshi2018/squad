@@ -492,7 +492,7 @@ function parseBootstrapProvenance(body, label) {
 // parseBootstrapProvenance's role above for the Cast PR path, and squad-bootstrap-validator.mjs's
 // parseBootstrapPrFallbackProvenance in production -- re-implemented here, not imported, so this
 // E2E cannot be fooled by a bug shared with the module under test). Requires exactly one
-// well-formed record binding repository, run_id, base_branch, head_branch, head_sha, and
+// well-formed record binding repository, run_id, base_branch, base_sha, head_branch, head_sha, and
 // compare_url; a fallback issue containing only the plain-text branch marker and a matching
 // compare-URL substring (but no valid signed record) must fail this check, because production's
 // own review guard would likewise refuse to trust it.
@@ -508,13 +508,14 @@ function parseBootstrapPrFallbackProvenance(body, label) {
     throw new Error(`${label} bootstrap pull request fallback provenance marker is malformed.`);
   }
   const keys = Object.keys(record).sort();
-  const expectedKeys = ['base_branch', 'compare_url', 'head_branch', 'head_sha', 'repository', 'run_id', 'schema'];
+  const expectedKeys = ['base_branch', 'base_sha', 'compare_url', 'head_branch', 'head_sha', 'repository', 'run_id', 'schema'];
   if (JSON.stringify(keys) !== JSON.stringify(expectedKeys)
     || record.schema !== 1
     || typeof record.repository !== 'string'
     || typeof record.run_id !== 'string'
     || !/^[1-9][0-9]*$/.test(record.run_id)
     || typeof record.base_branch !== 'string' || record.base_branch.length === 0
+    || !SHA_PATTERN.test(String(record.base_sha ?? ''))
     || typeof record.head_branch !== 'string' || record.head_branch.length === 0
     || !SHA_PATTERN.test(String(record.head_sha ?? ''))
     || typeof record.compare_url !== 'string' || !record.compare_url.startsWith('https://')) {
@@ -663,6 +664,7 @@ export function selectBootstrapFallback(outputs, baseline, installation, bootstr
     repository: outputs.target,
     run_id: String(bootstrapRun.databaseId),
     base_branch: baseline.defaultBranch,
+    base_sha: bootstrapRun.headSha,
     head_branch: CAST_BRANCH,
     head_sha: outputs.castBranchSha,
     compare_url: expectedCompareUrl,

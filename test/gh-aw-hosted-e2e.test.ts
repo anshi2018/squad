@@ -132,6 +132,7 @@ const fallbackProvenanceMarker = (overrides: Record<string, unknown> = {}) => (
     repository: 'owner/consumer',
     run_id: String(bootstrapRun.databaseId),
     base_branch: 'main',
+    base_sha: bootstrapRun.headSha,
     head_branch: 'squad/bootstrap-cast',
     head_sha: CAST_SHA,
     compare_url: fallbackCompareUrl,

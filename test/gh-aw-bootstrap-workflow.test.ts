@@ -1037,6 +1037,11 @@ describe('automatic Squad bootstrap workflow', () => {
 // control flow (including its fallback-to-issue catch block) the same way
 // `actions/github-script` runs it, not a reimplementation of it.
 describe('gh-aw: squad-bootstrap pull-request-creation permission-denied fallback', () => {
+  // context.sha inside this run's source is always the default branch's current commit (the
+  // workflow's own top-level `if: github.ref_name == github.event.repository.default_branch`
+  // gate guarantees this). Distinct from the Cast-branch head SHAs used elsewhere in this harness.
+  const BASE_SHA = 'c'.repeat(40);
+
   /** Read a short `const name = async (...) => { ... };` statement verbatim from source. */
   function extractConstArrow(source: string, declaration: string): string {
     const startIndex = source.indexOf(declaration);
@@ -1145,7 +1150,7 @@ describe('gh-aw: squad-bootstrap pull-request-creation permission-denied fallbac
     };
     const snapshot = { state: { pull_request: null }, issues: overrides.issues ?? [] };
     const payload = { files: [{ path: 'a.txt', content: 'hi' }], pr_body: 'body' };
-    const context = { repo: { owner: 'octo', repo: 'example' } };
+    const context = { repo: { owner: 'octo', repo: 'example' }, sha: BASE_SHA };
     const processEnv = {
       env: {
         SQUAD_BOOTSTRAP_DEFAULT_BRANCH: 'main',
@@ -1193,6 +1198,7 @@ describe('gh-aw: squad-bootstrap pull-request-creation permission-denied fallbac
       repository: 'octo/example',
       runId: '123',
       baseBranch: 'main',
+      baseSha: BASE_SHA,
       headBranch: BOOTSTRAP_BRANCH,
       headSha: 'b'.repeat(40),
       compareUrl,
@@ -1429,6 +1435,7 @@ describe('gh-aw: squad-bootstrap pull-request fallback pure helpers (unit + muta
 
   it('finds an existing open fallback issue by branch-bound marker, authorship, title, and provenance; fails closed on ambiguity', () => {
     const marker = bootstrapPrFallbackIssueMarker(BOOTSTRAP_BRANCH);
+    const baseSha = 'c'.repeat(40);
     const compareUrl = buildBootstrapPrFallbackCompareUrl({
       repository: 'octo/example',
       baseBranch: 'main',
@@ -1440,6 +1447,7 @@ describe('gh-aw: squad-bootstrap pull-request fallback pure helpers (unit + muta
       repository: 'octo/example',
       runId: '123',
       baseBranch: 'main',
+      baseSha,
       headBranch: BOOTSTRAP_BRANCH,
       headSha: 'b'.repeat(40),
       compareUrl,
@@ -1454,34 +1462,54 @@ describe('gh-aw: squad-bootstrap pull-request fallback pure helpers (unit + muta
       updated_at: '2026-01-01T00:00:00Z',
     });
     const open = validIssue();
-    expect(findExistingBootstrapPrFallbackIssue([], BOOTSTRAP_BRANCH)).toBeNull();
-    expect(findExistingBootstrapPrFallbackIssue([open], BOOTSTRAP_BRANCH)).toBe(open);
-    expect(findExistingBootstrapPrFallbackIssue([{ ...open, state: 'closed' }], BOOTSTRAP_BRANCH)).toBeNull();
-    expect(findExistingBootstrapPrFallbackIssue([{ state: 'open', body: 'unrelated' }], BOOTSTRAP_BRANCH)).toBeNull();
+    const expectedProvenance = {
+      repository: 'octo/example',
+      baseBranch: 'main',
+      baseSha,
+      headSha: 'b'.repeat(40),
+    };
+    expect(findExistingBootstrapPrFallbackIssue([], BOOTSTRAP_BRANCH, expectedProvenance)).toBeNull();
+    expect(findExistingBootstrapPrFallbackIssue([open], BOOTSTRAP_BRANCH, expectedProvenance)).toBe(open);
+    expect(findExistingBootstrapPrFallbackIssue([{ ...open, state: 'closed' }], BOOTSTRAP_BRANCH, expectedProvenance)).toBeNull();
+    expect(findExistingBootstrapPrFallbackIssue([{ state: 'open', body: 'unrelated' }], BOOTSTRAP_BRANCH, expectedProvenance)).toBeNull();
     // Forgery proof: a decoy with the marker but wrong authorship, title, or provenance is excluded,
     // not counted toward ambiguity and not returned as a match.
     expect(findExistingBootstrapPrFallbackIssue(
-      [{ ...open, user: { login: 'attacker', type: 'User' } }], BOOTSTRAP_BRANCH,
+      [{ ...open, user: { login: 'attacker', type: 'User' } }], BOOTSTRAP_BRANCH, expectedProvenance,
     )).toBeNull();
     expect(findExistingBootstrapPrFallbackIssue(
-      [{ ...open, title: 'unrelated title' }], BOOTSTRAP_BRANCH,
+      [{ ...open, title: 'unrelated title' }], BOOTSTRAP_BRANCH, expectedProvenance,
     )).toBeNull();
     expect(findExistingBootstrapPrFallbackIssue(
       [{ state: 'open', user: { login: 'github-actions[bot]', type: 'Bot' }, title: BOOTSTRAP_PR_FALLBACK_ISSUE_TITLE, body: `${marker}\nno provenance` }],
-      BOOTSTRAP_BRANCH,
+      BOOTSTRAP_BRANCH, expectedProvenance,
     )).toBeNull();
     // Recovery-stall proof: validateBootstrapPrFallbackAttribution always rejects an edited
     // fallback issue, so an edited issue must never be treated as a dedupe match either -
     // otherwise the bootstrap rerun would stall, forever reusing an issue review can't accept.
     expect(findExistingBootstrapPrFallbackIssue(
-      [{ ...open, updated_at: '2026-01-01T00:05:00Z' }], BOOTSTRAP_BRANCH,
+      [{ ...open, updated_at: '2026-01-01T00:05:00Z' }], BOOTSTRAP_BRANCH, expectedProvenance,
     )).toBeNull();
     expect(findExistingBootstrapPrFallbackIssue(
-      [{ ...open, created_at: undefined, updated_at: undefined }], BOOTSTRAP_BRANCH,
+      [{ ...open, created_at: undefined, updated_at: undefined }], BOOTSTRAP_BRANCH, expectedProvenance,
     )).toBeNull();
     expect(() =>
-      findExistingBootstrapPrFallbackIssue([open, validIssue('\nother')], BOOTSTRAP_BRANCH),
+      findExistingBootstrapPrFallbackIssue([open, validIssue('\nother')], BOOTSTRAP_BRANCH, expectedProvenance),
     ).toThrow(/Ambiguous/);
+    // Staleness proof: the default branch advanced since this record was signed (base_sha no
+    // longer matches). The stale issue must be filtered out as "no match" - never treated as an
+    // ambiguous decoy and never permanently blocking a fresh fallback issue from being filed.
+    expect(findExistingBootstrapPrFallbackIssue(
+      [open], BOOTSTRAP_BRANCH, { ...expectedProvenance, baseSha: 'd'.repeat(40) },
+    )).toBeNull();
+    // Mutation-kill anchor: a caller that forgets to supply expectedProvenance (or supplies a
+    // malformed one) must fail closed with a thrown error, never silently matching any
+    // structurally-valid-looking issue regardless of which base commit it was signed against.
+    expect(() => findExistingBootstrapPrFallbackIssue([open], BOOTSTRAP_BRANCH, undefined)).toThrow();
+    expect(() => findExistingBootstrapPrFallbackIssue([open], BOOTSTRAP_BRANCH, {})).toThrow();
+    expect(() => findExistingBootstrapPrFallbackIssue(
+      [open], BOOTSTRAP_BRANCH, { ...expectedProvenance, baseSha: 'not-a-sha' },
+    )).toThrow();
   });
 
 
@@ -1490,6 +1518,7 @@ describe('gh-aw: squad-bootstrap pull-request fallback pure helpers (unit + muta
     const provenanceLine = buildBootstrapPrFallbackProvenanceLine({
       repository: 'octo/example',
       runId: '123',
+      baseSha: 'c'.repeat(40),
       baseBranch: 'main',
       headBranch: BOOTSTRAP_BRANCH,
       headSha: 'a'.repeat(40),
@@ -1532,6 +1561,7 @@ describe('gh-aw: squad-bootstrap pull-request fallback pure helpers (unit + muta
       repository: 'octo/example',
       runId: '123',
       baseBranch: 'main',
+      baseSha: 'c'.repeat(40),
       headBranch: BOOTSTRAP_BRANCH,
       headSha: 'a'.repeat(40),
       compareUrl,
