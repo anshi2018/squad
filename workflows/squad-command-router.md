@@ -69,13 +69,23 @@ safe-outputs:
             // and a relayed continuation always arrives through
             // `squad.lock.yml`'s own `workflow_dispatch` input, never
             // through this issues/issue_comment router. So any bot-authored
-            // text that does reach this point is always untrusted.
+            // text that does reach this point is always untrusted. Both the
+            // content author and the event sender are checked, because on
+            // `edited` events the sender (who produced the current body) can
+            // differ from the original author recorded on the issue/comment.
             const commandAuthorTypeCandidate = process.env.SQUAD_EVENT_NAME === 'issue_comment'
               ? context.payload.comment?.user?.type
               : process.env.SQUAD_EVENT_NAME === 'issues'
                 ? context.payload.issue?.user?.type
                 : null;
-            if (commandAuthorTypeCandidate === 'Bot') {
+            // `issue.user.type`/`comment.user.type` reflect the *original* author, which is
+            // unchanged by an edit. On `edited` events the actor who actually produced the
+            // current body is `context.payload.sender`, which can differ from that original
+            // author (for example, a bot or collaborator editing someone else's human-authored
+            // issue/comment to inject a command). Checking only the original-author type would
+            // let such an edit bypass this bot block entirely, so both identities are checked.
+            const commandSenderTypeCandidate = context.payload.sender?.type;
+            if (commandAuthorTypeCandidate === 'Bot' || commandSenderTypeCandidate === 'Bot') {
               core.info('Ignoring a /squad command discovered in bot-authored issue or comment text.');
               return;
             }

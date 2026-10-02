@@ -31,6 +31,7 @@ import {
   bootstrapPrFallbackIssueMarker,
   buildBootstrapPrFallbackCompareUrl,
   buildBootstrapPrFallbackIssueBody,
+  buildBootstrapPrFallbackProvenanceLine,
   classifyBootstrapState,
   createBootstrapPayloadEnvelope,
   createBootstrapResearchComment,
@@ -1075,6 +1076,7 @@ describe('gh-aw: squad-bootstrap pull-request-creation permission-denied fallbac
     buildBootstrapPrFallbackCompareUrl,
     findExistingBootstrapPrFallbackIssue,
     buildBootstrapPrFallbackIssueBody,
+    buildBootstrapPrFallbackProvenanceLine,
     isCreatePullRequestPermissionDenied,
   };
 
@@ -1098,7 +1100,7 @@ describe('gh-aw: squad-bootstrap pull-request-creation permission-denied fallbac
           const notFound = Object.assign(new Error('Not Found'), { status: 404 });
           throw notFound;
         }
-        return { data: { object: { sha: 'bootstrap-ref-sha' } } };
+        return { data: { object: { sha: 'b'.repeat(40) } } };
       }
       if (ref === 'heads/main') {
         return { data: { object: { sha: 'main-sha' } } };
@@ -1261,23 +1263,56 @@ describe('gh-aw: squad-bootstrap pull-request-creation permission-denied fallbac
   });
 
   it('confirms the branch was actually pushed before falling back (regression: no silent fallback on a failed push)', async () => {
-    // getRef for the bootstrap branch never flips to "created" because createRef is stubbed
-    // to fail, so the post-catch confirmation must itself fail closed rather than reporting
-    // a fallback issue for a branch that was never pushed.
-    const { github, issuesCreateCalls } = makeGithub({
-      pullsCreate: async () => {
-        throw permissionDeniedError();
+    // createRef reports success (so the initial branch push appears to have worked and the
+    // code proceeds to pulls.create, which is then denied), but the post-catch confirmation
+    // call to getRef(heads/<branch>) still reports the ref as missing -- simulating an
+    // eventual-consistency gap between a successful createRef response and the ref actually
+    // being visible. Letting createRef itself fail (the prior version of this test) exits
+    // before ever reaching pulls.create or the catch block, so it never exercised this guard;
+    // deleting the guard would make this exact scenario wrongly report a fallback issue for a
+    // branch that cannot be confirmed pushed, so this must independently fail closed.
+    let bootstrapRefCalls = 0;
+    const issuesCreateCalls: Array<Record<string, unknown>> = [];
+    const github = {
+      rest: {
+        git: {
+          getRef: async ({ ref }: { ref: string }) => {
+            if (ref === `heads/${BOOTSTRAP_BRANCH}`) {
+              bootstrapRefCalls += 1;
+              const notFound = Object.assign(new Error('Not Found'), { status: 404 });
+              throw notFound;
+            }
+            if (ref === 'heads/main') return { data: { object: { sha: 'main-sha' } } };
+            throw new Error(`Unexpected getRef call: ${ref}`);
+          },
+          getCommit: async () => ({ data: { tree: { sha: 'base-tree-sha' } } }),
+          createBlob: async () => ({ data: { sha: 'blob-sha' } }),
+          createTree: async () => ({ data: { sha: 'created-tree-sha' } }),
+          createCommit: async () => ({ data: { sha: 'commit-sha' } }),
+          createRef: async () => ({ data: {} }),
+        },
+        pulls: {
+          create: async () => {
+            throw permissionDeniedError();
+          },
+        },
+        issues: {
+          create: async (args: Record<string, unknown>) => {
+            issuesCreateCalls.push(args);
+            return { data: { html_url: 'https://github.com/octo/example/issues/9', number: 9 } };
+          },
+        },
       },
-    });
-    github.rest.git.createRef = async () => {
-      throw new Error('could not create ref');
     };
     const args = makeArgs({});
     (args as unknown as { github: unknown }).github = github;
     await expect(
       compiled(args.snapshot, args.payload, stateModule, args.context, args.process, github, args.core, args.assertRemotePayload),
-    ).rejects.toThrow('could not create ref');
+    ).rejects.toThrow('candidate branch was not pushed');
     expect(issuesCreateCalls).toHaveLength(0);
+    // Pre-creation existence check + post-catch confirmation: the guard must actually be
+    // re-querying the ref, not just trusting createRef's own return value.
+    expect(bootstrapRefCalls).toBeGreaterThanOrEqual(2);
   });
 });
 
@@ -1330,19 +1365,37 @@ describe('gh-aw: squad-bootstrap pull-request fallback pure helpers (unit + muta
 
   it('binds the fallback issue body to the exact compare URL and branch marker', () => {
     const compareUrl = 'https://github.com/octo/example/compare/main...squad%2Fbootstrap-cast?expand=1';
+    const provenanceLine = buildBootstrapPrFallbackProvenanceLine({
+      repository: 'octo/example',
+      runId: '123',
+      baseBranch: 'main',
+      headBranch: BOOTSTRAP_BRANCH,
+      headSha: 'a'.repeat(40),
+      compareUrl,
+    });
     const body = buildBootstrapPrFallbackIssueBody({
       repository: 'octo/example',
       baseBranch: 'main',
       headBranch: BOOTSTRAP_BRANCH,
       compareUrl,
       runUrl: 'https://github.com/octo/example/actions/runs/123',
+      provenanceLine,
     });
     expect(body.startsWith(bootstrapPrFallbackIssueMarker(BOOTSTRAP_BRANCH))).toBe(true);
+    expect(body).toContain(provenanceLine);
     expect(body).toContain(compareUrl);
     expect(body).toContain('octo/example');
     expect(body).toContain('Allow GitHub Actions to create and approve pull requests');
     expect(() =>
-      buildBootstrapPrFallbackIssueBody({ repository: 'octo/example', baseBranch: 'main', headBranch: BOOTSTRAP_BRANCH, compareUrl: 'not-a-url' }),
+      buildBootstrapPrFallbackIssueBody({
+        repository: 'octo/example', baseBranch: 'main', headBranch: BOOTSTRAP_BRANCH, compareUrl: 'not-a-url',
+        provenanceLine,
+      }),
     ).toThrow();
+    expect(() =>
+      buildBootstrapPrFallbackIssueBody({
+        repository: 'octo/example', baseBranch: 'main', headBranch: BOOTSTRAP_BRANCH, compareUrl,
+      }),
+    ).toThrow(/signed provenance line/);
   });
 });

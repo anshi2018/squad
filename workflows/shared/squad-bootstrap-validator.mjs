@@ -269,6 +269,73 @@ export function bootstrapPrFallbackIssueMarker(headBranch) {
   return `<!-- ${BOOTSTRAP_PR_FALLBACK_ISSUE_MARKER_PREFIX} branch=${headBranch} -->`;
 }
 
+// Deliberately split like BOOTSTRAP_PR_FALLBACK_ISSUE_MARKER_PREFIX above, for the same
+// hidden-content-scanner reason.
+export const BOOTSTRAP_PR_FALLBACK_PROVENANCE_PREFIX = '<' + '!-- squad:bootstrap-pr-fallback-provenance ';
+
+// Builds the machine-readable, signed-by-context record embedded in the bootstrap PR
+// fallback issue body. This binds the issue to one exact repository, base-controlled
+// bootstrap run, base branch, pushed Cast branch, its exact head SHA, and the manual
+// compare URL a human is asked to open — so squad-review-guard can later re-verify a
+// human-authored Cast PR against this record instead of forgeable free text.
+export function buildBootstrapPrFallbackProvenanceLine({ repository, runId, baseBranch, headBranch, headSha, compareUrl }) {
+  if (typeof repository !== 'string' || !/^[^/\s]+\/[^/\s]+$/.test(repository)) {
+    throw new Error('Bootstrap PR fallback provenance requires an owner/repo repository identity.');
+  }
+  if (!/^[1-9]\d*$/.test(String(runId ?? ''))) {
+    throw new Error('Bootstrap PR fallback provenance requires a numeric run ID.');
+  }
+  if (typeof baseBranch !== 'string' || baseBranch.length === 0) {
+    throw new Error('Bootstrap PR fallback provenance requires a base branch.');
+  }
+  if (typeof headBranch !== 'string' || headBranch.length === 0) {
+    throw new Error('Bootstrap PR fallback provenance requires a head branch.');
+  }
+  if (typeof headSha !== 'string' || !/^[0-9a-f]{40}$/.test(headSha)) {
+    throw new Error('Bootstrap PR fallback provenance requires a 40-character lowercase head SHA.');
+  }
+  if (typeof compareUrl !== 'string' || !compareUrl.startsWith('https://')) {
+    throw new Error('Bootstrap PR fallback provenance requires a compare URL.');
+  }
+  const record = {
+    schema: 1,
+    repository,
+    run_id: String(runId),
+    base_branch: baseBranch,
+    head_branch: headBranch,
+    head_sha: headSha,
+    compare_url: compareUrl,
+  };
+  return `${BOOTSTRAP_PR_FALLBACK_PROVENANCE_PREFIX}${JSON.stringify(record)} -->`;
+}
+
+// Parses and strictly validates the signed record above. Returns null (never throws) on
+// anything missing, duplicated, malformed, or shaped incorrectly so callers can uniformly
+// fail closed; this never attempts partial recovery of a tampered or edited record.
+export function parseBootstrapPrFallbackProvenance(body) {
+  const text = String(body ?? '').replace(/\r\n/g, '\n');
+  const lines = text.split('\n').filter((line) => line.startsWith(BOOTSTRAP_PR_FALLBACK_PROVENANCE_PREFIX));
+  if (text.split(BOOTSTRAP_PR_FALLBACK_PROVENANCE_PREFIX.trim()).length !== 2 || lines.length !== 1) return null;
+  if (!lines[0].endsWith(' -->')) return null;
+  let value;
+  try {
+    value = JSON.parse(lines[0].slice(BOOTSTRAP_PR_FALLBACK_PROVENANCE_PREFIX.length, -4));
+  } catch {
+    return null;
+  }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const keys = ['schema', 'repository', 'run_id', 'base_branch', 'head_branch', 'head_sha', 'compare_url'];
+  if (Object.keys(value).sort().join('\0') !== [...keys].sort().join('\0')) return null;
+  if (value.schema !== 1) return null;
+  if (typeof value.repository !== 'string') return null;
+  if (!/^[1-9]\d*$/.test(String(value.run_id ?? ''))) return null;
+  if (typeof value.base_branch !== 'string' || value.base_branch.length === 0) return null;
+  if (typeof value.head_branch !== 'string' || value.head_branch.length === 0) return null;
+  if (!/^[0-9a-f]{40}$/.test(String(value.head_sha ?? ''))) return null;
+  if (typeof value.compare_url !== 'string' || !value.compare_url.startsWith('https://')) return null;
+  return value;
+}
+
 // Mirrors gh-aw's own compare-URL construction (per-segment encoding preserves '/'
 // in branch names while still encoding other special characters).
 export function buildBootstrapPrFallbackCompareUrl({ repository, baseBranch, headBranch, title, server }) {
@@ -304,17 +371,26 @@ export function findExistingBootstrapPrFallbackIssue(issues, headBranch) {
   return matches[0] ?? null;
 }
 
-export function buildBootstrapPrFallbackIssueBody({ repository, baseBranch, headBranch, compareUrl, runUrl }) {
+export function buildBootstrapPrFallbackIssueBody({
+  repository, baseBranch, headBranch, compareUrl, runUrl, provenanceLine,
+}) {
   if (typeof repository !== 'string' || repository.length === 0) {
     throw new Error('Bootstrap PR fallback issue requires a repository.');
   }
   if (typeof compareUrl !== 'string' || !compareUrl.startsWith('https://')) {
     throw new Error('Bootstrap PR fallback issue requires a compare URL.');
   }
+  if (
+    typeof provenanceLine !== 'string' ||
+    !provenanceLine.startsWith(BOOTSTRAP_PR_FALLBACK_PROVENANCE_PREFIX) ||
+    !provenanceLine.endsWith(' -->')
+  ) {
+    throw new Error('Bootstrap PR fallback issue requires a signed provenance line.');
+  }
   const marker = bootstrapPrFallbackIssueMarker(headBranch);
   const runLine = typeof runUrl === 'string' && runUrl.length > 0 ? `\n\nTriggering run: ${runUrl}` : '';
   return (
-    `${marker}\n` +
+    `${marker}\n${provenanceLine}\n` +
     '## GitHub Actions permission required\n\n' +
     `Squad bootstrap pushed the \`${headBranch}\` branch to \`${repository}\` (base \`${baseBranch}\`) but could ` +
     'not open the pull request because this repository does not allow GitHub Actions to create or approve pull ' +

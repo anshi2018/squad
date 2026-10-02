@@ -8,8 +8,11 @@ import {
   assertPristineTarget,
   guardedTargetMutation,
   sanitizedEnvironment,
+  selectBootstrapFallback,
   selectBootstrapOutputs,
   waitForBaseControlledReviewCanary,
+  waitForBootstrapCompletion,
+  waitForBootstrapFallback,
   waitForBootstrapOutputs,
 } from '../scripts/gh-aw-hosted-e2e.mjs';
 import {
@@ -115,6 +118,33 @@ const currentOutputs = (
   castBranchSha: CAST_SHA,
   castPrs: [castPr],
   issues: [researchIssue],
+});
+
+// Mirrors workflows/shared/squad-bootstrap-validator.mjs's bootstrapPrFallbackIssueMarker /
+// buildBootstrapPrFallbackIssueBody, independently re-derived (not imported) so this test does
+// not trust the module it is meant to catch regressions in.
+const fallbackCompareUrl = 'https://github.com/owner/consumer/compare/main...squad/bootstrap-cast?expand=1';
+const currentFallbackIssue = {
+  number: 22,
+  url: 'https://example.test/issues/22',
+  title: '[squad] Manual pull request creation required for the Cast branch',
+  body: `<!-- squad:bootstrap-pr-fallback branch=squad/bootstrap-cast -->\n`
+    + '## GitHub Actions permission required\n\n'
+    + `Squad bootstrap pushed the \`squad/bootstrap-cast\` branch to \`owner/consumer\` (base \`main\`) but could `
+    + 'not open the pull request because this repository does not allow GitHub Actions to create or approve pull '
+    + 'requests.\n\n'
+    + '### Create the pull request manually\n\n'
+    + `${fallbackCompareUrl}\n\n`,
+  createdAt: '2026-09-24T20:01:06.000Z',
+  author: ACTIONS_BOT,
+  state: 'open',
+};
+const currentFallbackOutputs = (fallbackIssue = currentFallbackIssue) => ({
+  target: 'owner/consumer',
+  expectedAuthor: ACTIONS_BOT,
+  castBranchSha: CAST_SHA,
+  castPrs: [],
+  issues: [fallbackIssue],
 });
 
 describe('Squad gh-aw hosted E2E controller', () => {
@@ -602,3 +632,190 @@ describe('Squad gh-aw hosted E2E controller', () => {
       .toThrow(/Ambiguous current bootstrap outputs/);
   });
 });
+
+describe('Squad gh-aw hosted E2E manual pull request fallback outcome', () => {
+  it('accepts a current fallback issue bound to the Cast branch', () => {
+    expect(selectBootstrapFallback(
+      currentFallbackOutputs(),
+      baseline,
+      installation,
+      bootstrapRun,
+    )).toEqual({ fallbackIssue: currentFallbackIssue, castBranchSha: CAST_SHA });
+  });
+
+  it('does not accept an old fallback issue predating the installation run', () => {
+    const oldIssue = { ...currentFallbackIssue, number: 19, createdAt: '2026-09-24T19:59:00.000Z' };
+    expect(selectBootstrapFallback(
+      currentFallbackOutputs(oldIssue),
+      baseline,
+      installation,
+      bootstrapRun,
+    )).toBeNull();
+  });
+
+  it('rejects a fallback issue not authored by the expected GitHub Actions bot', () => {
+    const attacker = { login: 'attacker', id: 999, type: 'User' };
+    expect(() => selectBootstrapFallback(
+      currentFallbackOutputs({ ...currentFallbackIssue, author: attacker }),
+      baseline,
+      installation,
+      bootstrapRun,
+    )).toThrow(/expected GitHub Actions bot/);
+  });
+
+  it.each([
+    ['missing marker', 'Squad bootstrap pushed a branch, but you need to create the pull request manually.'],
+    ['marker bound to a different branch', '<!-- squad:bootstrap-pr-fallback branch=some-other-branch -->\nBody'],
+  ])('rejects a fallback issue with a %s', (_label, body) => {
+    expect(() => selectBootstrapFallback(
+      currentFallbackOutputs({ ...currentFallbackIssue, body }),
+      baseline,
+      installation,
+      bootstrapRun,
+    )).toThrow(/canonical pull request fallback marker/);
+  });
+
+  it('fails closed when the Cast branch was never pushed', () => {
+    expect(() => selectBootstrapFallback(
+      { ...currentFallbackOutputs(), castBranchSha: null },
+      baseline,
+      installation,
+      bootstrapRun,
+    )).toThrow(/Cast branch was not pushed/);
+  });
+
+  it('rejects a fallback issue missing the expected compare URL', () => {
+    expect(() => selectBootstrapFallback(
+      currentFallbackOutputs({ ...currentFallbackIssue, body: currentFallbackIssue.body.replace(fallbackCompareUrl, 'https://example.test/not-a-compare-url') }),
+      baseline,
+      installation,
+      bootstrapRun,
+    )).toThrow(/expected compare URL/);
+  });
+
+  it('fails closed on duplicate current-run fallback issues', () => {
+    expect(() => selectBootstrapFallback(
+      { ...currentFallbackOutputs(), issues: [currentFallbackIssue, { ...currentFallbackIssue, number: 23 }] },
+      baseline,
+      installation,
+      bootstrapRun,
+    )).toThrow(/Ambiguous current bootstrap fallback issues/);
+  });
+
+  it('polls until the fallback issue appears, then resolves', () => {
+    let now = 0;
+    let calls = 0;
+    const github = {
+      ...fakeGitHub(),
+      listBranches: () => [
+        { name: 'main', sha: TARGET_SHA },
+        { name: 'squad/bootstrap-cast', sha: CAST_SHA },
+      ],
+      listIssues: () => {
+        calls += 1;
+        return calls < 2 ? [] : [currentFallbackIssue];
+      },
+    };
+    const result = waitForBootstrapFallback(
+      'owner/consumer',
+      baseline,
+      installation,
+      bootstrapRun,
+      {
+        github,
+        now: () => now,
+        pause: (milliseconds: number) => { now += milliseconds; },
+        timeoutMs: 100,
+        pollMs: 10,
+      },
+    );
+    expect(result).toEqual({ fallbackIssue: currentFallbackIssue, castBranchSha: CAST_SHA });
+    expect(calls).toBeGreaterThanOrEqual(2);
+  });
+
+  it('times out waiting for a fallback issue that never arrives', () => {
+    let now = 0;
+    expect(() => waitForBootstrapFallback(
+      'owner/consumer',
+      baseline,
+      installation,
+      bootstrapRun,
+      {
+        github: fakeGitHub(),
+        now: () => now,
+        pause: (milliseconds: number) => { now += milliseconds; },
+        timeoutMs: 20,
+        pollMs: 10,
+      },
+    )).toThrow(/Timed out/);
+  });
+
+  it('waitForBootstrapCompletion resolves a Cast PR outcome as kind "pr"', () => {
+    const github = {
+      ...fakeGitHub(),
+      listBranches: () => [
+        { name: 'main', sha: TARGET_SHA },
+        { name: 'squad/bootstrap-cast', sha: CAST_SHA },
+      ],
+      listPullRequests: () => [currentCastPr],
+      listIssues: () => [currentResearchIssue],
+    };
+    expect(waitForBootstrapCompletion(
+      'owner/consumer',
+      baseline,
+      installation,
+      bootstrapRun,
+      { github, timeoutMs: 100, pollMs: 10 },
+    )).toEqual({ kind: 'pr', castPr: currentCastPr, researchIssue: currentResearchIssue });
+  });
+
+  it('waitForBootstrapCompletion resolves a fallback-issue outcome as kind "fallback"', () => {
+    const github = {
+      ...fakeGitHub(),
+      listBranches: () => [
+        { name: 'main', sha: TARGET_SHA },
+        { name: 'squad/bootstrap-cast', sha: CAST_SHA },
+      ],
+      listIssues: () => [currentFallbackIssue],
+    };
+    expect(waitForBootstrapCompletion(
+      'owner/consumer',
+      baseline,
+      installation,
+      bootstrapRun,
+      { github, timeoutMs: 100, pollMs: 10 },
+    )).toEqual({ kind: 'fallback', fallbackIssue: currentFallbackIssue, castBranchSha: CAST_SHA });
+  });
+
+  it('waitForBootstrapCompletion times out when neither outcome ever appears', () => {
+    let now = 0;
+    expect(() => waitForBootstrapCompletion(
+      'owner/consumer',
+      baseline,
+      installation,
+      bootstrapRun,
+      {
+        github: fakeGitHub(),
+        now: () => now,
+        pause: (milliseconds: number) => { now += milliseconds; },
+        timeoutMs: 20,
+        pollMs: 10,
+      },
+    )).toThrow(/Timed out/);
+  });
+
+  it('a malformed fallback-issue body still fails closed under source mutation (regression anchor)', () => {
+    // Mutation-kill anchor for selectBootstrapFallback's marker/compare-URL checks: this proves
+    // the guard is reachable and actually enforced, not merely declared. If either check were
+    // deleted or inverted, this issue (whose body intentionally omits the compare URL fragment)
+    // would be wrongly accepted instead of throwing.
+    const malformed = { ...currentFallbackIssue, body: currentFallbackIssue.body.split('### Create')[0] };
+    expect(() => selectBootstrapFallback(
+      currentFallbackOutputs(malformed),
+      baseline,
+      installation,
+      bootstrapRun,
+    )).toThrow(/expected compare URL/);
+  });
+});
+

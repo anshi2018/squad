@@ -435,7 +435,10 @@ gh api --method PUT "repos/${owner_repo}/actions/permissions/workflow" \
 git switch -c chore/squad-gh-aw-bootstrap
 # SQUAD_SHA is supplied explicitly (maintainer-approved), never resolved from dev's tip
 : "${SQUAD_SHA:?STOP: set SQUAD_SHA to an explicit, maintainer-approved 40-character Squad commit SHA.}"
-[[ "${SQUAD_SHA}" =~ ^[0-9a-f]{40}$ ]]
+[[ "${SQUAD_SHA}" =~ ^[0-9a-f]{40}$ ]] || {
+  echo "STOP: SQUAD_SHA must be an explicit, maintainer-approved 40-character lowercase hex commit SHA." >&2
+  exit 1
+}
 gh aw add "bradygaster/squad/workflows@${SQUAD_SHA}"
 
 # Safe-update report shows ONLY the two documented secrets + squad-init → approve once

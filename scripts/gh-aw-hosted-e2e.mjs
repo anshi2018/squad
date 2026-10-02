@@ -38,6 +38,13 @@ const CAST_PR_TITLE = '[squad] Cast your Squad';
 const RESEARCH_ISSUE_TITLE = '[Research Proposals] Agent-discovered repo opportunities';
 const RESEARCH_MARKER = '<!-- squad:bootstrap-opportunities schema=1 -->';
 const PROVENANCE_MARKER_PATTERN = /^<!-- squad:bootstrap-provenance (\{[^\r\n]+\}) -->$/gm;
+// Every public/enlistment/setup target now requires `can_approve_pull_request_reviews=false`
+// (see docs/src/content/docs/guide/gh-aw.md), so GITHUB_TOKEN pull request creation fails
+// closed on every hosted bootstrap run and the workflow falls back to this manual-PR issue
+// instead of a Cast PR. These constants independently re-derive the expected fallback shape
+// (mirroring squad-bootstrap-validator.mjs) so the E2E does not trust the module under test.
+const BOOTSTRAP_PR_FALLBACK_ISSUE_TITLE = '[squad] Manual pull request creation required for the Cast branch';
+const BOOTSTRAP_PR_FALLBACK_MARKER_PATTERN = /^<!-- squad:bootstrap-pr-fallback branch=(\S+) -->/;
 const ACTIONS_BOT_LOGIN = 'github-actions[bot]';
 const ACTIONS_BOT_ID = 41898282;
 const SAFE_CHILD_ENV = Object.freeze([
@@ -566,6 +573,103 @@ export function waitForBootstrapOutputs(
   throw new Error('Timed out waiting for the draft Cast PR and bootstrap research issue.');
 }
 
+// Mirrors selectBootstrapOutputs, but for the manual pull request fallback issue that bootstrap
+// opens instead of a Cast PR whenever GITHUB_TOKEN pull request creation is denied (the only
+// reachable outcome once a target enforces the required `can_approve_pull_request_reviews=false`
+// Actions permission). No research issue is created on this path: bootstrap returns immediately
+// after opening the fallback issue, before the research-issue step ever runs.
+export function selectBootstrapFallback(outputs, baseline, installation, bootstrapRun) {
+  const cutoff = Math.max(
+    Date.parse(baseline.capturedAt),
+    Date.parse(installation.mergedAt),
+    Date.parse(bootstrapRun.createdAt),
+  );
+  const fallbackIssues = outputs.issues.filter((issue) => (
+    issue.number > baseline.maximumIssueNumber
+    && Date.parse(issue.createdAt) >= cutoff
+    && issue.title === BOOTSTRAP_PR_FALLBACK_ISSUE_TITLE
+  ));
+  if (fallbackIssues.length > 1) {
+    throw new Error(`Ambiguous current bootstrap fallback issues: found ${fallbackIssues.length}.`);
+  }
+  if (fallbackIssues.length !== 1) return null;
+  const [fallbackIssue] = fallbackIssues;
+  if (!sameAuthor(fallbackIssue.author, outputs.expectedAuthor)) {
+    throw new Error('Bootstrap fallback issue was not authored by the expected GitHub Actions bot.');
+  }
+  const marker = String(fallbackIssue.body ?? '').match(BOOTSTRAP_PR_FALLBACK_MARKER_PATTERN);
+  if (!marker || marker[1] !== CAST_BRANCH) {
+    throw new Error('Bootstrap fallback issue is missing the canonical pull request fallback marker.');
+  }
+  if (!outputs.castBranchSha || !SHA_PATTERN.test(outputs.castBranchSha)) {
+    throw new Error('Bootstrap fallback issue exists but the Cast branch was not pushed.');
+  }
+  const expectedCompareFragment = `/compare/${baseline.defaultBranch}...${CAST_BRANCH}`;
+  if (!String(fallbackIssue.body ?? '').includes(expectedCompareFragment)) {
+    throw new Error('Bootstrap fallback issue does not link to the expected compare URL.');
+  }
+  return { fallbackIssue, castBranchSha: outputs.castBranchSha };
+}
+
+export function waitForBootstrapFallback(
+  target,
+  baseline,
+  installation,
+  bootstrapRun,
+  {
+    github = githubAdapter,
+    now = Date.now,
+    pause = sleep,
+    timeoutMs = 5 * 60 * 1000,
+    pollMs = 10_000,
+  } = {},
+) {
+  const deadline = now() + timeoutMs;
+  while (now() < deadline) {
+    const selected = selectBootstrapFallback(
+      bootstrapOutputs(target, github),
+      baseline,
+      installation,
+      bootstrapRun,
+    );
+    if (selected) return selected;
+    pause(pollMs);
+  }
+  throw new Error('Timed out waiting for the bootstrap manual pull request fallback issue.');
+}
+
+// Polls for whichever bootstrap outcome is actually reachable. Under the required
+// `can_approve_pull_request_reviews=false` policy only the fallback-issue outcome is reachable
+// in practice (pull request creation fails closed every time), but both selectors are checked
+// every cycle so this also still exercises the Cast-PR + review-canary path unmodified against
+// a target where that setting was deliberately left permissive for canary-only testing.
+export function waitForBootstrapCompletion(
+  target,
+  baseline,
+  installation,
+  bootstrapRun,
+  {
+    github = githubAdapter,
+    now = Date.now,
+    pause = sleep,
+    timeoutMs = 5 * 60 * 1000,
+    pollMs = 10_000,
+  } = {},
+) {
+  const deadline = now() + timeoutMs;
+  while (now() < deadline) {
+    const outputs = bootstrapOutputs(target, github);
+    const prOutcome = selectBootstrapOutputs(outputs, baseline, installation, bootstrapRun);
+    if (prOutcome) return { kind: 'pr', ...prOutcome };
+    const fallbackOutcome = selectBootstrapFallback(outputs, baseline, installation, bootstrapRun);
+    if (fallbackOutcome) return { kind: 'fallback', ...fallbackOutcome };
+    pause(pollMs);
+  }
+  throw new Error(
+    'Timed out waiting for either a draft Cast PR with research issue, or a manual pull request fallback issue.',
+  );
+}
+
 export function waitForBaseControlledReviewCanary(
   target,
   castPr,
@@ -831,17 +935,37 @@ function hosted(args, repositoryRoot) {
       installation,
       bootstrapRun: installRun,
     });
-    const outputs = waitForBootstrapOutputs(
+    const completion = waitForBootstrapCompletion(
       targetState.target,
       targetState.baseline,
       installation,
       installRun,
     );
-    const reviewCanary = waitForBaseControlledReviewCanary(
-      targetState.target,
-      outputs.castPr,
-      evidence,
-    );
+    // Only the 'pr' outcome exercises the base-controlled Squad Review canary: it requires a
+    // real pull request for squad-review's pull_request_target trigger to act on. The required
+    // `can_approve_pull_request_reviews=false` Actions permission (docs/src/content/docs/guide/
+    // gh-aw.md) makes GITHUB_TOKEN pull request creation fail closed, so the 'fallback' outcome
+    // is the only one reachable against a target configured per the published setup guidance;
+    // the 'pr' branch is retained for an explicitly permissive canary-only target.
+    const bootstrapSummary = completion.kind === 'pr'
+      ? (() => {
+          const reviewCanary = waitForBaseControlledReviewCanary(
+            targetState.target,
+            completion.castPr,
+            evidence,
+          );
+          return {
+            bootstrap_outcome: 'cast_pr',
+            review_canary_pr: completion.castPr.number,
+            review_canary_check: reviewCanary.check.id,
+            generated_cast_pr: completion.castPr.url,
+            generated_research_issue: completion.researchIssue.url,
+          };
+        })()
+      : {
+          bootstrap_outcome: 'fallback_issue',
+          generated_fallback_issue: completion.fallbackIssue.url,
+        };
 
     runChild('git', ['fetch', 'origin', targetState.info.default_branch], { cwd: checkout });
     const probeBranch = `squad-e2e/probe-${process.env.GITHUB_RUN_ID ?? sourceSha.slice(0, 12)}`;
@@ -895,12 +1019,9 @@ function hosted(args, repositoryRoot) {
       source_sha: sourceSha,
       installation_pr: installation.number,
       installation_run: installRun.url,
-      review_canary_pr: outputs.castPr.number,
-      review_canary_check: reviewCanary.check.id,
+      ...bootstrapSummary,
       probe_pr: probeMerge.number,
       probe_run: probeRun.url,
-      generated_cast_pr: outputs.castPr.url,
-      generated_research_issue: outputs.researchIssue.url,
       generated_work_merged: false,
     });
   } finally {

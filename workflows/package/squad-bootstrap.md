@@ -154,7 +154,7 @@ pre-agent-steps:
       # BEGIN GENERATED RESOURCE DIGESTS
       check_hash "$install_verifier" "cf474be9b04d339f7e7a18c65e776b8a53e84bea5b4b85abfe65ed11f7b782ce"
       check_hash "$cast_validator" "c6d0b92aac71dc6f6d5727cac418a323b0bc9c12047400faa12d96150d548ada"
-      check_hash "$bootstrap_validator" "b0efadfb1444f64a92a6f7e2e0c72621811aab8016c30c2b2fc31cbbb64b745d"
+      check_hash "$bootstrap_validator" "50c5cfd85592b8080a2c4a3cb22d84cbbe50684171e16d86cdaca4b44be55c29"
       # END GENERATED RESOURCE DIGESTS
       node "$bootstrap_validator" \
         --encode-payload "${GITHUB_WORKSPACE:?}/.github/workflows/squad-bootstrap-payload.json" \
@@ -517,12 +517,21 @@ safe-outputs:
                     return;
                   }
                   const runUrl = `${process.env.GITHUB_SERVER_URL || 'https://github.com'}/${repository}/actions/runs/${process.env.SQUAD_BOOTSTRAP_RUN_ID}`;
+                  const provenanceLine = stateModule.buildBootstrapPrFallbackProvenanceLine({
+                    repository,
+                    runId: process.env.SQUAD_BOOTSTRAP_RUN_ID,
+                    baseBranch: process.env.SQUAD_BOOTSTRAP_DEFAULT_BRANCH,
+                    headBranch: stateModule.BOOTSTRAP_BRANCH,
+                    headSha: pushedRef.object.sha,
+                    compareUrl,
+                  });
                   const fallbackBody = stateModule.buildBootstrapPrFallbackIssueBody({
                     repository,
                     baseBranch: process.env.SQUAD_BOOTSTRAP_DEFAULT_BRANCH,
                     headBranch: stateModule.BOOTSTRAP_BRANCH,
                     compareUrl,
                     runUrl,
+                    provenanceLine,
                   });
                   try {
                     const fallbackIssue = await github.rest.issues.create({

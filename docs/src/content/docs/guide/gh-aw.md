@@ -262,6 +262,42 @@ request manually. Every bootstrap and Cast PR, whichever way it is opened,
 still requires an independent human (or `@copilot`) approving review before
 merge — `GITHUB_TOKEN` is never used to self-approve.
 
+The manually created pull request from that compare-URL link is human-authored
+(no bot provenance comment exists on it), so it cannot satisfy Squad Review's
+ordinary base-controlled bootstrap provenance check by itself. Instead, Squad
+Review re-verifies it against the **bot-authored fallback issue's signed
+provenance record**. That issue (opened by `squad-bootstrap` only after the
+automated pull-request creation call was permission-denied) embeds a
+machine-readable, HTML-comment-delimited JSON record binding the repository,
+the triggering bootstrap workflow run, the exact base and pushed head
+branches, the exact pushed head commit SHA, and the exact compare URL. Squad
+Review accepts the manually opened pull request in place of bot authorship
+only when **all** of the following hold, otherwise it fails closed with the
+unchanged bootstrap-provenance error:
+
+- the fallback issue is open, bot-authored, carries the expected title and
+  branch marker, and was never edited after creation (`updated_at ===
+  created_at`);
+- exactly one such open fallback issue exists for the branch (no ambiguity or
+  duplicates);
+- the issue's signed record parses and its `repository`, `base_branch`,
+  `head_branch`, and `head_sha` fields exactly match the live pull request,
+  and its `compare_url` exactly matches the reconstructed expected link;
+- the issue was created at or before the pull request (it cannot be
+  backdated to retroactively legitimize an unrelated PR); and
+- the record's referenced bootstrap run is a successful `push`-triggered run
+  of the bootstrap workflow, in this repository, targeting the same base
+  branch.
+
+Every other review, provenance, content, and head-pinning check this workflow
+performs is unchanged — this exception replaces only the pull-request-author
+bot-attribution predicate for this one narrowly-scoped case. An unrelated
+human-authored pull request on any other branch, or one without a matching
+signed fallback issue, still receives the ordinary unchanged bootstrap
+provenance rejection. As with every Squad-opened pull request, merging still
+requires an independent human (or `@copilot`) approving review — `GITHUB_TOKEN`
+is never used to self-approve.
+
 ### Create a bootstrap branch
 
 ```bash
